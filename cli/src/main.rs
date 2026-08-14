@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(
-    name = "sumi",
+    name = "seni",
     version,
     about = "runtime config switching for nix"
 )]
@@ -26,11 +26,11 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    /// path to the manifest; overrides SUMI_MANIFEST
+    /// path to the manifest; overrides SENI_MANIFEST
     #[arg(long, global = true, value_name = "PATH")]
     manifest: Option<PathBuf>,
 
-    /// state directory; overrides SUMI_STATE_DIR
+    /// state directory; overrides SENI_STATE_DIR
     #[arg(long, global = true, value_name = "PATH")]
     state_dir: Option<PathBuf>,
 }
@@ -40,7 +40,7 @@ enum Command {
     /// create or update managed links and run effects
     Activate,
 
-    /// remove sumi-managed links and clear the active state
+    /// remove seni-managed links and clear the active state
     Deactivate,
 
     /// list facets or the values of one facet
@@ -74,8 +74,8 @@ fn main() -> ExitCode {
         let cli = Cli::parse();
         let manifest_path = cli
             .manifest
-            .or_else(|| env::var_os("SUMI_MANIFEST").map(PathBuf::from))
-            .context("manifest not configured; use --manifest or SUMI_MANIFEST")?;
+            .or_else(|| env::var_os("SENI_MANIFEST").map(PathBuf::from))
+            .context("manifest not configured; use --manifest or SENI_MANIFEST")?;
         let manifest_path = fs::canonicalize(&manifest_path)
             .context(format_args!("manifest '{}'", manifest_path.display()))?;
         let manifest_file = fs::File::open(&manifest_path)
@@ -84,8 +84,8 @@ fn main() -> ExitCode {
 
         let state_dir = cli
             .state_dir
-            .or_else(|| env::var_os("SUMI_STATE_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| config.home.join(".local/state/sumi"));
+            .or_else(|| env::var_os("SENI_STATE_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| config.home.join(".local/state/seni"));
         let state_dir = if state_dir.is_absolute() {
             state_dir
         } else {
@@ -177,7 +177,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("sumi: {error}");
+            eprintln!("seni: {error}");
             ExitCode::FAILURE
         }
     }

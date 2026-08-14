@@ -5,7 +5,7 @@
   ...
 }: let
   types = lib.types;
-  cfg = config.sumi;
+  cfg = config.seni;
 
   fileKinds = ["home" "config" "cache" "data" "state"];
 
@@ -69,7 +69,7 @@
     else if builtins.isPath value
     then {
       outPath = builtins.path {
-        name = lib.strings.sanitizeDerivationName "sumi-${baseNameOf (toString value)}";
+        name = lib.strings.sanitizeDerivationName "seni-${baseNameOf (toString value)}";
         path = value;
       };
     }
@@ -81,8 +81,8 @@
 
   renderArgv = map (argument: toString (materialize argument));
 in {
-  options.sumi = {
-    enable = lib.mkEnableOption "Sumi facet-based runtime config switching";
+  options.seni = {
+    enable = lib.mkEnableOption "Seni facet-based runtime config switching";
 
     facet = lib.mkOption {
       type = types.attrsOf facetOptionType;
@@ -106,7 +106,7 @@ in {
     path = {
       home = lib.mkOption {
         type = types.str;
-        description = "home directory managed by Sumi";
+        description = "home directory managed by Seni";
       };
 
       config = lib.mkOption {
@@ -136,8 +136,8 @@ in {
 
     stateDirectory = lib.mkOption {
       type = types.str;
-      default = "${cfg.path.state}/sumi";
-      description = "Sumi runtime state directory";
+      default = "${cfg.path.state}/seni";
+      description = "Seni runtime state directory";
     };
 
     generated.manifest = lib.mkOption {
@@ -191,7 +191,7 @@ in {
         if dynamicFiles == []
         then pkgs.emptyDirectory
         else
-          pkgs.runCommandLocal (lib.strings.sanitizeDerivationName "sumi-${facet}-${variant}") {} ''
+          pkgs.runCommandLocal (lib.strings.sanitizeDerivationName "seni-${facet}-${variant}") {} ''
             set -eu
             mkdir -p "$out"
             ${lib.concatMapStringsSep "\n" (file: let
@@ -247,27 +247,27 @@ in {
             if lib.isFunction file.value
             then {facet = file.facet;}
             else if builtins.isString file.value
-            then toString (pkgs.writeText (lib.strings.sanitizeDerivationName "sumi-${file.path}") file.value)
+            then toString (pkgs.writeText (lib.strings.sanitizeDerivationName "seni-${file.path}") file.value)
             else toString (materialize file.value);
         })
         files);
       effects = manifestEffects;
     };
-    manifestPath = pkgs.writeText "sumi-manifest.json" (builtins.toJSON manifest);
+    manifestPath = pkgs.writeText "seni-manifest.json" (builtins.toJSON manifest);
     wrapperEnvironment = {
       XDG_CONFIG_HOME = cfg.path.config;
       XDG_CACHE_HOME = cfg.path.cache;
       XDG_DATA_HOME = cfg.path.data;
       XDG_STATE_HOME = cfg.path.state;
-      SUMI_MANIFEST = manifestPath;
-      SUMI_STATE_DIR = cfg.stateDirectory;
+      SENI_MANIFEST = manifestPath;
+      SENI_STATE_DIR = cfg.stateDirectory;
     };
     wrappedCli = pkgs.symlinkJoin {
-      name = "sumi";
+      name = "seni";
       paths = [(pkgs.callPackage ./cli/default.nix {})];
       nativeBuildInputs = [pkgs.makeWrapper];
       postBuild = ''
-        wrapProgram "$out/bin/sumi" ${lib.escapeShellArgs (lib.concatMap (name: ["--set" name (toString wrapperEnvironment.${name})]) (builtins.attrNames wrapperEnvironment))}
+        wrapProgram "$out/bin/seni" ${lib.escapeShellArgs (lib.concatMap (name: ["--set" name (toString wrapperEnvironment.${name})]) (builtins.attrNames wrapperEnvironment))}
       '';
     };
   in {
@@ -278,39 +278,39 @@ in {
           && directory != "/"
           && lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.drop 1 (lib.splitString "/" directory)))
         ((builtins.attrValues directories) ++ [cfg.stateDirectory]);
-        message = "Sumi directories must be normalized absolute paths";
+        message = "Seni directories must be normalized absolute paths";
       }
       {
         assertion = cfg.facet != {};
-        message = "sumi.facet must define at least one facet";
+        message = "seni.facet must define at least one facet";
       }
       {
         assertion = lib.all (name: name != "" && name != "." && name != ".." && !lib.hasInfix "/" name) (builtins.attrNames cfg.facet);
-        message = "Sumi facet names must be single path segments";
+        message = "Seni facet names must be single path segments";
       }
       {
         assertion = lib.all (facet: facet.variants != {} && builtins.hasAttr facet.default facet.variants && lib.all (variant: variant != "") (builtins.attrNames facet.variants)) (builtins.attrValues cfg.facet);
-        message = "Sumi facets must have variants and a valid default";
+        message = "Seni facets must have variants and a valid default";
       }
       {
         assertion = lib.all (kind: cfg.file.${kind} == {} || roots.${kind} != null) fileKinds;
-        message = "Sumi file directories must be within sumi.path.home";
+        message = "Seni file directories must be within seni.path.home";
       }
       {
         assertion = lib.all (file: file.valid) files;
-        message = "Sumi file paths must be normalized relative paths";
+        message = "Seni file paths must be normalized relative paths";
       }
       {
         assertion = lib.all (file: lib.isFunction file.value == (file.facet != null)) files;
-        message = "Sumi function file values require a facet, and static values cannot set one";
+        message = "Seni function file values require a facet, and static values cannot set one";
       }
       {
         assertion = lib.all (file: file.facet == null || builtins.hasAttr file.facet cfg.facet) files;
-        message = "Sumi files must reference defined facets";
+        message = "Seni files must reference defined facets";
       }
       {
         assertion = lib.all (matches: lib.length matches == 1) (builtins.attrValues filesByPath);
-        message = "Sumi file destinations must be unique";
+        message = "Seni file destinations must be unique";
       }
       {
         assertion =
@@ -319,7 +319,7 @@ in {
           in
             lib.any (count: builtins.hasAttr (lib.concatStringsSep "/" (lib.take count segments)) filesByPath) (lib.range 1 (lib.length segments - 1)))
           managedPaths;
-        message = "Sumi file destinations cannot contain one another";
+        message = "Seni file destinations cannot contain one another";
       }
       {
         assertion = lib.all (name: let
@@ -330,7 +330,7 @@ in {
           && lib.all (facet: builtins.hasAttr facet cfg.facet) effect.on
           && (!lib.isFunction effect.exec || lib.length effect.on == 1))
         (builtins.attrNames cfg.effect);
-        message = "Sumi effects must reference defined facets, and function effects require exactly one facet";
+        message = "Seni effects must reference defined facets, and function effects require exactly one facet";
       }
       {
         assertion = lib.all (effect:
@@ -338,13 +338,13 @@ in {
           then effect.exec != [] && lib.hasPrefix "/" (builtins.head effect.exec)
           else lib.all (argv: argv != [] && lib.hasPrefix "/" (builtins.head argv)) (builtins.attrValues effect.exec.variants))
         (builtins.attrValues manifestEffects);
-        message = "Sumi effect commands must have an absolute executable";
+        message = "Seni effect commands must have an absolute executable";
       }
     ];
 
     environment.systemPackages = [wrappedCli];
 
-    sumi = {
+    seni = {
       generated.manifest = manifestPath;
       package = wrappedCli;
     };

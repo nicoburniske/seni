@@ -20,7 +20,7 @@
           };
         };
 
-        config.sumi = {
+        config.seni = {
           enable = true;
           path.home = "/home/tester";
 
@@ -66,10 +66,10 @@
     ];
   };
   failedAssertions = lib.filter (entry: !entry.assertion) eval.config.assertions;
-  manifest = eval.config.sumi.generated.manifest;
+  manifest = eval.config.seni.generated.manifest;
 in
   assert lib.assertMsg (failedAssertions == []) (lib.concatMapStringsSep "; " (entry: entry.message) failedAssertions);
-    pkgs.runCommand "sumi-manifest-test" {
+    pkgs.runCommand "seni-manifest-test" {
       nativeBuildInputs = [pkgs.nushell];
     } ''
       set -eu

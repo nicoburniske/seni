@@ -1,5 +1,5 @@
 {
-  description = "Sumi: facet-based runtime config switching for NixOS and nix-darwin";
+  description = "Seni: facet-based runtime config switching for NixOS and nix-darwin";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -18,10 +18,10 @@
     }: {
       imports = [./default.nix];
 
-      config = lib.mkIf config.sumi.enable {
-        system.userActivationScripts.sumi = ''
-          if [ "$HOME" = ${lib.escapeShellArg config.sumi.path.home} ]; then
-            ${config.sumi.package}/bin/sumi activate
+      config = lib.mkIf config.seni.enable {
+        system.userActivationScripts.seni = ''
+          if [ "$HOME" = ${lib.escapeShellArg config.seni.path.home} ]; then
+            ${config.seni.package}/bin/seni activate
           fi
         '';
       };
@@ -34,26 +34,26 @@
     }: {
       imports = [./default.nix];
 
-      config = lib.mkIf config.sumi.enable {
+      config = lib.mkIf config.seni.enable {
         assertions = [
           {
-            assertion = config.system.primaryUser == null || config.sumi.path.home == config.system.primaryUserHome;
-            message = "sumi.path.home must be the nix-darwin primary user's home";
+            assertion = config.system.primaryUser == null || config.seni.path.home == config.system.primaryUserHome;
+            message = "seni.path.home must be the nix-darwin primary user's home";
           }
         ];
 
-        system.requiresPrimaryUser = ["sumi"];
+        system.requiresPrimaryUser = ["seni"];
         system.activationScripts.postActivation.text = lib.mkAfter ''
-          /usr/bin/sudo -H -u ${lib.escapeShellArg config.system.primaryUser} -- ${config.sumi.package}/bin/sumi activate
+          /usr/bin/sudo -H -u ${lib.escapeShellArg config.system.primaryUser} -- ${config.seni.package}/bin/seni activate
         '';
       };
     };
 
     packages = forAllSystems (system: let
-      sumi = nixpkgs.legacyPackages.${system}.callPackage ./cli/default.nix {};
+      seni = nixpkgs.legacyPackages.${system}.callPackage ./cli/default.nix {};
     in {
-      default = sumi;
-      inherit sumi;
+      default = seni;
+      inherit seni;
     });
 
     checks = forAllSystems (system: let
@@ -80,7 +80,7 @@
     apps = forAllSystems (system: {
       default = {
         type = "app";
-        program = "${self.packages.${system}.sumi}/bin/sumi";
+        program = "${self.packages.${system}.seni}/bin/seni";
       };
     });
   };

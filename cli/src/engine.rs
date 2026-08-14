@@ -104,7 +104,7 @@ pub fn activate(
         fs::create_dir_all(target.parent().unwrap())
             .context(format_args!("parent directory for '{}'", target.display()))?;
         let mut temporary = OsString::from(target.as_os_str());
-        temporary.push(".sumi-tmp");
+        temporary.push(".seni-tmp");
         let temporary = PathBuf::from(temporary);
         symlink(&*source, &temporary)
             .context(format_args!("temporary link '{}'", temporary.display()))?;
@@ -112,7 +112,7 @@ pub fn activate(
             if let Err(error) = fs::remove_file(&temporary) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
-                        "sumi: warning: temporary link '{}': {error}",
+                        "seni: warning: temporary link '{}': {error}",
                         temporary.display()
                     );
                 }
@@ -148,7 +148,7 @@ pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
             }
             Err(context) => {
                 eprintln!(
-                    "sumi: warning: managed target '{}': {context}",
+                    "seni: warning: managed target '{}': {context}",
                     target.display()
                 );
                 summary.failed += 1;
@@ -163,7 +163,7 @@ pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
             Ok(actual) => actual,
             Err(context) => {
                 eprintln!(
-                    "sumi: warning: managed target '{}': {context}",
+                    "seni: warning: managed target '{}': {context}",
                     target.display()
                 );
                 summary.failed += 1;
@@ -178,7 +178,7 @@ pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
             Ok(()) => summary.removed += 1,
             Err(context) => {
                 eprintln!(
-                    "sumi: warning: managed target '{}': {context}",
+                    "seni: warning: managed target '{}': {context}",
                     target.display()
                 );
                 summary.failed += 1;
@@ -201,7 +201,7 @@ pub fn switch(
     let state = LockedState::open(state_dir)?;
     let raw = state
         .current_selection()?
-        .context("configuration is not active. run 'sumi activate'")?;
+        .context("configuration is not active. run 'seni activate'")?;
     let mut selection = config.parse_selection(raw)?;
 
     let mut requested = Vec::with_capacity(sets.len());
@@ -511,7 +511,7 @@ impl Drop for PendingState {
             if let Err(error) = fs::remove_file(&self.pointer) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
-                        "sumi: warning: pending pointer '{}': {error}",
+                        "seni: warning: pending pointer '{}': {error}",
                         self.pointer.display()
                     );
                 }
@@ -519,7 +519,7 @@ impl Drop for PendingState {
             if let Err(error) = fs::remove_dir_all(&self.path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
-                        "sumi: warning: pending state '{}': {error}",
+                        "seni: warning: pending state '{}': {error}",
                         self.path.display()
                     );
                 }
@@ -541,7 +541,7 @@ mod tests {
 
     impl TestDir {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("sumi-{}-{name}", std::process::id()));
+            let path = std::env::temp_dir().join(format!("seni-{}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir(&path).unwrap();
             Self(path)
@@ -730,7 +730,7 @@ mod tests {
             }),
         );
         let state = temp.0.join("state");
-        let temporary = temp.0.join(".config/app/current.sumi-tmp");
+        let temporary = temp.0.join(".config/app/current.seni-tmp");
         fs::create_dir_all(temporary.parent().unwrap()).unwrap();
         symlink(&old, &temporary).unwrap();
         assert!(activate(&old_config, &old_manifest, &state).is_err());

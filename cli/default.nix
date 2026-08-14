@@ -1,6 +1,6 @@
 {rustPlatform}:
 rustPlatform.buildRustPackage {
-  pname = "sumi";
+  pname = "seni";
   version = "0.1.0";
 
   src = ./.;
