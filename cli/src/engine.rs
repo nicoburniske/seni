@@ -209,6 +209,14 @@ pub fn switch(
     Ok(selection)
 }
 
+pub fn current_selection(config: &Config, state_dir: &Path) -> crate::Result<Selection> {
+    let state = LockedState::open(state_dir)?;
+    match state.current_selection()? {
+        Some(raw) => config.parse_selection(raw),
+        None => Ok(config.default_selection()),
+    }
+}
+
 fn managed_source<'a>(
     config: &'a Config,
     state_dir: &Path,

@@ -1,15 +1,18 @@
 mod effects;
+mod engine;
 mod error;
 pub type Result<T> = std::result::Result<T, error::Error>;
 
 pub mod manifest;
-mod switching;
 
 use clap::{Parser, Subcommand};
 use error::Context;
-use manifest::Config;
+use manifest::{Config, Facet, NamedSelection, VariantId};
+use serde::Serialize;
+use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -29,6 +32,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Activate,
+    Facets {
+        facet: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+    Selection {
+        #[arg(long)]
+        json: bool,
+    },
     Switch {
         #[arg(value_name = "FACET=VALUE")]
         set: Vec<String>,
@@ -66,11 +79,63 @@ fn main() -> ExitCode {
 
         match cli.command {
             Command::Activate => {
-                switching::activate(&config, &manifest_path, &state_dir)?;
+                engine::activate(&config, &manifest_path, &state_dir)?;
                 println!("activated configuration");
             }
+            Command::Facets { facet, json } => {
+                let selection = engine::current_selection(&config, &state_dir)?;
+                if let Some(name) = facet {
+                    let facet_id = config
+                        .facet_id(&name)
+                        .context(format_args!("unknown facet '{name}'"))?;
+                    let facet = &config[facet_id];
+                    if json {
+                        print_json(&facet_json(facet, selection[facet_id]))?;
+                    } else {
+                        let current = facet.variant(selection[facet_id]).0;
+                        for variant in facet.variants.keys() {
+                            let prefix = if variant.as_ref() == current {
+                                "*"
+                            } else {
+                                " "
+                            };
+                            println!("{prefix} {variant}");
+                        }
+                    }
+                } else if json {
+                    let facets = config
+                        .facets()
+                        .map(|(facet_id, name, facet)| {
+                            (name.to_owned(), facet_json(facet, selection[facet_id]))
+                        })
+                        .collect::<Map<_, _>>();
+                    print_json(&facets)?;
+                } else {
+                    for (facet_id, name, facet) in config.facets() {
+                        println!(
+                            "{name} current={} default={} variants={}",
+                            facet.variant(selection[facet_id]).0,
+                            facet.variant(facet.default).0,
+                            facet.variants.len()
+                        );
+                    }
+                }
+            }
+            Command::Selection { json } => {
+                let selection = engine::current_selection(&config, &state_dir)?;
+                if json {
+                    print_json(&NamedSelection {
+                        config: &config,
+                        selection: &selection,
+                    })?;
+                } else {
+                    for (facet_id, name, facet) in config.facets() {
+                        println!("{name}={}", facet.variant(selection[facet_id]).0);
+                    }
+                }
+            }
             Command::Switch { set } => {
-                switching::switch(&config, &manifest_path, &state_dir, &set)?;
+                engine::switch(&config, &manifest_path, &state_dir, &set)?;
                 println!("switched selection");
             }
         }
@@ -85,4 +150,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn print_json(value: &impl Serialize) -> crate::Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    serde_json::to_writer_pretty(&mut stdout, value).context("could not serialize JSON")?;
+    writeln!(stdout).context("could not write JSON")?;
+    Ok(())
+}
+
+fn facet_json(facet: &Facet, current: VariantId) -> Value {
+    json!({
+        "current": facet.variant(current).0,
+        "default": facet.variant(facet.default).0,
+        "variants": facet.variants.keys().collect::<Vec<_>>(),
+    })
 }
