@@ -264,7 +264,7 @@ in {
     };
     wrappedCli = pkgs.symlinkJoin {
       name = "seni";
-      paths = [(pkgs.callPackage ./cli/default.nix {})];
+      paths = [(pkgs.callPackage ./package.nix {})];
       nativeBuildInputs = [pkgs.makeWrapper];
       postBuild = ''
         wrapProgram "$out/bin/seni" ${lib.escapeShellArgs (lib.concatMap (name: ["--set" name (toString wrapperEnvironment.${name})]) (builtins.attrNames wrapperEnvironment))}

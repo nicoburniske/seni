@@ -6,7 +6,7 @@
   eval = lib.evalModules {
     specialArgs = {inherit pkgs;};
     modules = [
-      ../default.nix
+      ../module.nix
       {
         options = {
           assertions = lib.mkOption {
