@@ -106,28 +106,8 @@ pub fn activate(
         let mut temporary = OsString::from(target.as_os_str());
         temporary.push(".sumi-tmp");
         let temporary = PathBuf::from(temporary);
-        match fs::symlink_metadata(&temporary) {
-            Err(context) if context.kind() == std::io::ErrorKind::NotFound => {}
-            Err(context) => {
-                return Err(Error::context(
-                    format_args!("temporary link '{}'", temporary.display()),
-                    context,
-                ))
-            }
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                fs::remove_file(&temporary)
-                    .context(format_args!("temporary link '{}'", temporary.display()))?;
-            }
-            Ok(_) => {
-                return Err(error!(
-                    "temporary path '{}' already exists",
-                    temporary.display()
-                ))
-            }
-        }
-
         symlink(&*source, &temporary)
-            .context(format_args!("managed link '{}'", target.display()))?;
+            .context(format_args!("temporary link '{}'", temporary.display()))?;
         if let Err(context) = fs::rename(&temporary, &target) {
             if let Err(error) = fs::remove_file(&temporary) {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -750,6 +730,12 @@ mod tests {
             }),
         );
         let state = temp.0.join("state");
+        let temporary = temp.0.join(".config/app/current.sumi-tmp");
+        fs::create_dir_all(temporary.parent().unwrap()).unwrap();
+        symlink(&old, &temporary).unwrap();
+        assert!(activate(&old_config, &old_manifest, &state).is_err());
+        assert_eq!(fs::read_link(&temporary).unwrap(), old);
+        fs::remove_file(&temporary).unwrap();
         activate(&old_config, &old_manifest, &state).unwrap();
 
         let log = temp.0.join("effects.log");
