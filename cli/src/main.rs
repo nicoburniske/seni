@@ -1,10 +1,10 @@
 mod error;
-mod manifest;
+pub mod manifest;
 mod switching;
 
 use clap::{Parser, Subcommand};
 use error::AppError;
-use manifest::Manifest;
+use manifest::Config;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -42,17 +42,15 @@ fn main() -> ExitCode {
             .map_err(|source| AppError::fs("resolve manifest", &manifest_path, source))?;
         let manifest_file = fs::File::open(&manifest_path)
             .map_err(|source| AppError::fs("open manifest", &manifest_path, source))?;
-        let manifest: Manifest =
-            serde_json::from_reader(manifest_file).map_err(|source| AppError::ParseJson {
-                path: manifest_path.clone(),
-                source,
-            })?;
-        manifest.validate()?;
+        let config = Config::parse(manifest_file).map_err(|source| AppError::ParseManifest {
+            path: manifest_path.clone(),
+            source,
+        })?;
 
         let state_dir = cli
             .state_dir
             .or_else(|| env::var_os("SUMI_STATE_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| manifest.home.join(".local/state/sumi"));
+            .unwrap_or_else(|| config.home().join(".local/state/sumi"));
         let state_dir = if state_dir.is_absolute() {
             state_dir
         } else {
@@ -63,7 +61,7 @@ fn main() -> ExitCode {
 
         match cli.command {
             Command::Switch { set } => {
-                switching::switch(&manifest, &manifest_path, &state_dir, &set)?;
+                switching::switch(&config, &manifest_path, &state_dir, &set)?;
                 println!("switched selection");
             }
         }

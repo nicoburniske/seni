@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::manifest::ParseError;
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("manifest not configured; pass --manifest or set SUMI_MANIFEST")]
@@ -14,6 +16,13 @@ pub enum AppError {
 
     #[error("invalid state: {0}")]
     InvalidState(String),
+
+    #[error("invalid manifest at '{}': {source}", path.display())]
+    ParseManifest {
+        path: PathBuf,
+        #[source]
+        source: ParseError,
+    },
 
     #[error("could not parse JSON at '{}': {source}", path.display())]
     ParseJson {
