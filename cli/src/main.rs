@@ -17,33 +17,53 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "sumi", version, about = "facet-based runtime config switching")]
+#[command(
+    name = "sumi",
+    version,
+    about = "runtime config switching for nix"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    #[arg(long, global = true)]
+    /// path to the manifest; overrides SUMI_MANIFEST
+    #[arg(long, global = true, value_name = "PATH")]
     manifest: Option<PathBuf>,
 
-    #[arg(long, global = true)]
+    /// state directory; overrides SUMI_STATE_DIR
+    #[arg(long, global = true, value_name = "PATH")]
     state_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// create or update managed links and run effects
     Activate,
+
+    /// remove sumi-managed links and clear the active state
     Deactivate,
+
+    /// list facets or the values of one facet
     Facets {
+        /// facet whose values to list
+        #[arg(value_name = "FACET")]
         facet: Option<String>,
 
+        /// print JSON instead of text
         #[arg(long)]
         json: bool,
     },
+
+    /// show the current selection
     Selection {
+        /// print JSON instead of text
         #[arg(long)]
         json: bool,
     },
+
+    /// change selected facet values and run affected effects
     Switch {
+        /// facet value to select
         #[arg(value_name = "FACET=VALUE")]
         set: Vec<String>,
     },
