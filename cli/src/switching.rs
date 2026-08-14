@@ -1,4 +1,4 @@
-use crate::error::AppError;
+use crate::error::{error, Context, Error};
 use crate::manifest::{Config, RawSelection, Selection};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::symlink;
@@ -10,66 +10,72 @@ pub fn switch(
     manifest_path: &Path,
     state_dir: &Path,
     sets: &[String],
-) -> Result<Selection, AppError> {
-    fs::create_dir_all(state_dir)
-        .map_err(|source| AppError::fs("create state directory", state_dir, source))?;
+) -> crate::Result<Selection> {
+    fs::create_dir_all(state_dir).context(format_args!(
+        "could not create state directory '{}'",
+        state_dir.display()
+    ))?;
     let lock_path = state_dir.join("switch.lock");
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&lock_path)
-        .map_err(|source| AppError::fs("open switch lock", &lock_path, source))?;
-    lock.lock()
-        .map_err(|source| AppError::fs("acquire switch lock", &lock_path, source))?;
+        .context(format_args!(
+            "could not open switch lock '{}'",
+            lock_path.display()
+        ))?;
+    lock.lock().context(format_args!(
+        "could not acquire switch lock '{}'",
+        lock_path.display()
+    ))?;
 
     let current = state_dir.join("current");
     let mut selection = match fs::symlink_metadata(&current) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => config.default_selection(),
-        Err(source) => return Err(AppError::fs("inspect current pointer", &current, source)),
+        Err(context) => {
+            return Err(Error::context(
+                format_args!("could not inspect current pointer '{}'", current.display()),
+                context,
+            ))
+        }
         Ok(metadata) if !metadata.file_type().is_symlink() => {
-            return Err(AppError::InvalidState(format!(
-                "'{}' is not a symlink",
-                current.display()
-            )))
+            return Err(error!("'{}' is not a symlink", current.display()))
         }
         Ok(_) => {
             let path = current.join("selection.json");
-            let file = fs::File::open(&path)
-                .map_err(|source| AppError::fs("open current selection", &path, source))?;
-            let raw: RawSelection =
-                serde_json::from_reader(file).map_err(|source| AppError::ParseJson {
-                    path: path.clone(),
-                    source,
-                })?;
+            let file = fs::File::open(&path).context(format_args!(
+                "could not open current selection '{}'",
+                path.display()
+            ))?;
+            let raw: RawSelection = serde_json::from_reader(file)
+                .context(format_args!("could not parse JSON at '{}'", path.display()))?;
             config.parse_selection(raw)?
         }
     };
 
     for set in sets {
         let Some((name, value)) = set.split_once('=') else {
-            return Err(AppError::InvalidSelection(format!(
-                "'{set}' must have the form facet=value"
-            )));
+            return Err(error!("'{set}' must have the form facet=value"));
         };
         let facet_id = config
             .facet_id(name)
-            .ok_or_else(|| AppError::InvalidSelection(format!("unknown facet '{name}'")))?;
-        let variant_id = config[facet_id].variant_id(value).ok_or_else(|| {
-            AppError::InvalidSelection(format!("unknown value '{value}' for facet '{name}'"))
-        })?;
+            .context(format_args!("unknown facet '{name}'"))?;
+        let variant_id = config[facet_id]
+            .variant_id(value)
+            .context(format_args!("unknown value '{value}' for facet '{name}'"))?;
         selection[facet_id] = variant_id;
     }
 
     for (facet_id, name, facet) in config.facets() {
         let variant_id = selection[facet_id];
         let (value, variant) = facet.variant(variant_id);
-        let metadata = fs::metadata(variant.root())
-            .map_err(|source| AppError::fs("inspect variant root", variant.root(), source))?;
+        let metadata = fs::metadata(variant.root()).context(format_args!(
+            "could not inspect variant root '{}'",
+            variant.root().display()
+        ))?;
         if !metadata.is_dir() {
-            return Err(AppError::InvalidManifest(format!(
-                "root for {name}={value} is not a directory"
-            )));
+            return Err(error!("root for {name}={value} is not a directory"));
         }
     }
 
@@ -77,18 +83,22 @@ pub fn switch(
     match fs::remove_file(&current_tmp) {
         Ok(()) => {}
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(AppError::fs(
-                "remove stale current pointer",
-                &current_tmp,
-                source,
+        Err(context) => {
+            return Err(Error::context(
+                format_args!(
+                    "could not remove stale current pointer '{}'",
+                    current_tmp.display()
+                ),
+                context,
             ))
         }
     }
 
     let generations_dir = state_dir.join("generations");
-    fs::create_dir_all(&generations_dir)
-        .map_err(|source| AppError::fs("create generations directory", &generations_dir, source))?;
+    fs::create_dir_all(&generations_dir).context(format_args!(
+        "could not create generations directory '{}'",
+        generations_dir.display()
+    ))?;
     let generation_id = format!(
         "{}-{}",
         SystemTime::now()
@@ -98,50 +108,67 @@ pub fn switch(
         std::process::id()
     );
     let generation_dir = generations_dir.join(&generation_id);
-    fs::create_dir(&generation_dir)
-        .map_err(|source| AppError::fs("create runtime generation", &generation_dir, source))?;
+    fs::create_dir(&generation_dir).context(format_args!(
+        "could not create runtime generation '{}'",
+        generation_dir.display()
+    ))?;
 
-    let build_result = (|| {
+    let build_result: crate::Result<()> = (|| {
         let root_dir = generation_dir.join("root");
-        fs::create_dir(&root_dir)
-            .map_err(|source| AppError::fs("create generation roots", &root_dir, source))?;
+        fs::create_dir(&root_dir).context(format_args!(
+            "could not create generation roots '{}'",
+            root_dir.display()
+        ))?;
         let generation_manifest = generation_dir.join("manifest");
-        symlink(manifest_path, &generation_manifest).map_err(|source| {
-            AppError::fs("link generation manifest", &generation_manifest, source)
-        })?;
+        symlink(manifest_path, &generation_manifest).context(format_args!(
+            "could not link generation manifest '{}'",
+            generation_manifest.display()
+        ))?;
         let selection_path = generation_dir.join("selection.json");
-        let selection_file = fs::File::create(&selection_path).map_err(|source| {
-            AppError::fs("create generation selection", &selection_path, source)
-        })?;
+        let selection_file = fs::File::create(&selection_path).context(format_args!(
+            "could not create generation selection '{}'",
+            selection_path.display()
+        ))?;
         serde_json::to_writer_pretty(selection_file, &config.named_selection(&selection))
-            .map_err(AppError::SerializeSelection)?;
+            .context("could not serialize selection")?;
 
         for (facet_id, name, facet) in config.facets() {
             let variant_id = selection[facet_id];
             let variant = facet.variant(variant_id).1;
             let link = root_dir.join(name);
-            symlink(variant.root(), &link)
-                .map_err(|source| AppError::fs("link selected variant", &link, source))?;
+            symlink(variant.root(), &link).context(format_args!(
+                "could not link selected variant '{}'",
+                link.display()
+            ))?;
         }
 
-        Ok::<_, AppError>(())
+        Ok(())
     })();
     if let Err(error) = build_result {
         let _ = fs::remove_dir_all(&generation_dir);
         return Err(error);
     }
 
-    if let Err(source) = symlink(
+    let pointer = symlink(
         PathBuf::from("generations").join(&generation_id),
         &current_tmp,
-    ) {
+    )
+    .context(format_args!(
+        "could not create current pointer '{}'",
+        current_tmp.display()
+    ));
+    if let Err(error) = pointer {
         let _ = fs::remove_dir_all(&generation_dir);
-        return Err(AppError::fs("create current pointer", &current_tmp, source));
+        return Err(error);
     }
-    if let Err(source) = fs::rename(&current_tmp, &current) {
+    let replace = fs::rename(&current_tmp, &current).context(format_args!(
+        "could not replace current pointer '{}'",
+        current.display()
+    ));
+    if let Err(error) = replace {
         let _ = fs::remove_file(&current_tmp);
         let _ = fs::remove_dir_all(&generation_dir);
-        return Err(AppError::fs("replace current pointer", &current, source));
+        return Err(error);
     }
 
     Ok(selection)
@@ -316,10 +343,7 @@ mod tests {
         let (config, manifest_path, state) = fixture(&temp.0, false);
 
         for set in ["unknown=value", "theme=unknown", "theme"] {
-            assert!(matches!(
-                switch(&config, &manifest_path, &state, &[set.to_string()]),
-                Err(AppError::InvalidSelection(_))
-            ));
+            assert!(switch(&config, &manifest_path, &state, &[set.to_string()]).is_err());
         }
         assert!(!state.join("current").exists());
     }
@@ -330,9 +354,6 @@ mod tests {
         let (config, manifest_path, state) = fixture(&temp.0, false);
         fs::create_dir_all(state.join("current")).unwrap();
 
-        assert!(matches!(
-            switch(&config, &manifest_path, &state, &[]),
-            Err(AppError::InvalidState(_))
-        ));
+        assert!(switch(&config, &manifest_path, &state, &[]).is_err());
     }
 }

@@ -1,9 +1,11 @@
 mod error;
+pub type Result<T> = std::result::Result<T, error::Error>;
+
 pub mod manifest;
 mod switching;
 
 use clap::{Parser, Subcommand};
-use error::AppError;
+use error::Context;
 use manifest::Config;
 use std::env;
 use std::fs;
@@ -32,20 +34,21 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let result = (|| {
+    let result: crate::Result<()> = (|| {
         let cli = Cli::parse();
         let manifest_path = cli
             .manifest
             .or_else(|| env::var_os("SUMI_MANIFEST").map(PathBuf::from))
-            .ok_or(AppError::ManifestNotConfigured)?;
-        let manifest_path = fs::canonicalize(&manifest_path)
-            .map_err(|source| AppError::fs("resolve manifest", &manifest_path, source))?;
-        let manifest_file = fs::File::open(&manifest_path)
-            .map_err(|source| AppError::fs("open manifest", &manifest_path, source))?;
-        let config = Config::parse(manifest_file).map_err(|source| AppError::ParseManifest {
-            path: manifest_path.clone(),
-            source,
-        })?;
+            .context("manifest not configured; pass --manifest or set SUMI_MANIFEST")?;
+        let manifest_path = fs::canonicalize(&manifest_path).context(format_args!(
+            "could not resolve manifest '{}'",
+            manifest_path.display()
+        ))?;
+        let manifest_file = fs::File::open(&manifest_path).context(format_args!(
+            "could not open manifest '{}'",
+            manifest_path.display()
+        ))?;
+        let config = Config::parse(manifest_file)?;
 
         let state_dir = cli
             .state_dir
@@ -55,7 +58,7 @@ fn main() -> ExitCode {
             state_dir
         } else {
             env::current_dir()
-                .map_err(|source| AppError::fs("resolve current directory", ".", source))?
+                .context("could not resolve current directory '.'")?
                 .join(state_dir)
         };
 
@@ -66,7 +69,7 @@ fn main() -> ExitCode {
             }
         }
 
-        Ok::<_, AppError>(())
+        Ok(())
     })();
 
     match result {

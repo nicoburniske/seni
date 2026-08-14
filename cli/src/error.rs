@@ -1,54 +1,82 @@
-use std::path::{Path, PathBuf};
-use thiserror::Error;
+use std::fmt;
+use std::panic::Location;
 
-use crate::manifest::ParseError;
-
-#[derive(Debug, Error)]
-pub enum AppError {
-    #[error("manifest not configured; pass --manifest or set SUMI_MANIFEST")]
-    ManifestNotConfigured,
-
-    #[error("invalid manifest: {0}")]
-    InvalidManifest(String),
-
-    #[error("invalid selection: {0}")]
-    InvalidSelection(String),
-
-    #[error("invalid state: {0}")]
-    InvalidState(String),
-
-    #[error("invalid manifest at '{}': {source}", path.display())]
-    ParseManifest {
-        path: PathBuf,
-        #[source]
-        source: ParseError,
-    },
-
-    #[error("could not parse JSON at '{}': {source}", path.display())]
-    ParseJson {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
-
-    #[error("could not serialize selection: {0}")]
-    SerializeSelection(#[source] serde_json::Error),
-
-    #[error("could not {operation} '{}': {source}", path.display())]
-    Filesystem {
-        operation: &'static str,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+macro_rules! error {
+    ($($argument:tt)*) => {
+        $crate::error::Error::message(format_args!($($argument)*))
+    };
 }
 
-impl AppError {
-    pub fn fs(operation: &'static str, path: impl AsRef<Path>, source: std::io::Error) -> Self {
-        Self::Filesystem {
-            operation,
-            path: path.as_ref().to_path_buf(),
-            source,
+pub(crate) use error;
+
+pub struct Error {
+    message: Box<str>,
+    context: Box<str>,
+    location: &'static Location<'static>,
+}
+
+impl Error {
+    #[track_caller]
+    pub fn message(message: impl fmt::Display) -> Self {
+        Self {
+            message: message.to_string().into_boxed_str(),
+            context: Box::default(),
+            location: Location::caller(),
+        }
+    }
+
+    #[track_caller]
+    pub fn context(message: impl fmt::Display, context: impl fmt::Display) -> Self {
+        Self {
+            message: message.to_string().into_boxed_str(),
+            context: context.to_string().into_boxed_str(),
+            location: Location::caller(),
+        }
+    }
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.message)?;
+        if !self.context.is_empty() {
+            write!(formatter, ": {}", self.context)?;
+        }
+        write!(
+            formatter,
+            " [{}:{}:{}]",
+            self.location.file(),
+            self.location.line(),
+            self.location.column()
+        )
+    }
+}
+
+pub trait Context<T> {
+    fn context(self, message: impl fmt::Display) -> crate::Result<T>;
+}
+
+impl<T, E: fmt::Display> Context<T> for std::result::Result<T, E> {
+    #[track_caller]
+    fn context(self, message: impl fmt::Display) -> crate::Result<T> {
+        match self {
+            Ok(value) => Ok(value),
+            Err(context) => Err(Error::context(message, context)),
+        }
+    }
+}
+
+impl<T> Context<T> for Option<T> {
+    #[track_caller]
+    fn context(self, message: impl fmt::Display) -> crate::Result<T> {
+        match self {
+            Some(value) => Ok(value),
+            None => Err(Error::message(message)),
         }
     }
 }

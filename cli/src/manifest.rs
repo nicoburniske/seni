@@ -1,11 +1,10 @@
-use crate::error::AppError;
+use crate::error::{error, Context};
 use indexmap::IndexMap;
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::ops::{Index, IndexMut};
 use std::path::{Path, PathBuf};
-use thiserror::Error;
 
 pub type Argv = Box<[Box<str>]>;
 pub type RawSelection = IndexMap<Box<str>, Box<str>>;
@@ -66,163 +65,130 @@ pub enum EffectExec {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Selection(Box<[VariantId]>);
 
-#[derive(Debug, Error)]
-pub enum ParseError {
-    #[error("{0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    Invalid(String),
-}
-
 impl Config {
-    pub fn parse(reader: impl Read) -> Result<Self, ParseError> {
-        let raw: RawManifest = serde_json::from_reader(reader)?;
+    pub fn parse(reader: impl Read) -> crate::Result<Self> {
+        let raw: RawManifest =
+            serde_json::from_reader(reader).context("could not parse manifest JSON")?;
         if raw.version != 4 {
-            return Err(ParseError::Invalid(format!(
-                "unsupported version {}, expected 4",
-                raw.version
-            )));
+            return Err(error!("unsupported version {}, expected 4", raw.version));
         }
         if !raw.home.is_absolute() {
-            return Err(ParseError::Invalid(
-                "home must be an absolute path".to_string(),
-            ));
+            return Err(error!("home must be an absolute path"));
         }
         if raw.facets.is_empty() {
-            return Err(ParseError::Invalid(
-                "at least one facet is required".to_string(),
-            ));
+            return Err(error!("at least one facet is required"));
         }
 
         let mut facets = IndexMap::with_capacity(raw.facets.len());
         for (name, raw_facet) in raw.facets {
             validate_facet_name(&name)?;
             if raw_facet.variants.is_empty() {
-                return Err(ParseError::Invalid(format!(
-                    "facet '{name}' has no variants"
-                )));
+                return Err(error!("facet '{name}' has no variants"));
             }
 
             let mut variants = IndexMap::with_capacity(raw_facet.variants.len());
             for (variant_name, root) in raw_facet.variants {
                 if variant_name.is_empty() {
-                    return Err(ParseError::Invalid(format!(
-                        "facet '{name}' has an empty variant name"
-                    )));
+                    return Err(error!("facet '{name}' has an empty variant name"));
                 }
                 if !root.is_absolute() {
-                    return Err(ParseError::Invalid(format!(
-                        "root for {name}={variant_name} must be absolute"
-                    )));
+                    return Err(error!("root for {name}={variant_name} must be absolute"));
                 }
                 variants.insert(variant_name, Variant { root });
             }
             let default = variants
                 .get_index_of(raw_facet.default.as_ref())
                 .map(VariantId)
-                .ok_or_else(|| {
-                    ParseError::Invalid(format!(
-                        "facet '{name}' default '{}' is not a variant",
-                        raw_facet.default
-                    ))
-                })?;
+                .context(format_args!(
+                    "facet '{name}' default '{}' is not a variant",
+                    raw_facet.default
+                ))?;
             facets.insert(name, Facet { default, variants });
         }
 
         let mut files = Vec::with_capacity(raw.files.len());
         for (path, raw_file) in raw.files {
             validate_managed_path(&path)?;
-            let source = match raw_file {
-                RawManagedFile::Static(source) => {
-                    if !source.is_absolute() {
-                        return Err(ParseError::Invalid(format!(
-                            "static source for '{path}' must be absolute"
-                        )));
+            let source =
+                match raw_file {
+                    RawManagedFile::Static(source) => {
+                        if !source.is_absolute() {
+                            return Err(error!("static source for '{path}' must be absolute"));
+                        }
+                        Source::Static(source)
                     }
-                    Source::Static(source)
-                }
-                RawManagedFile::Facet { facet } => {
-                    let facet_id = facets
-                        .get_index_of(facet.as_ref())
-                        .map(FacetId)
-                        .ok_or_else(|| {
-                            ParseError::Invalid(format!(
-                                "file '{path}' references unknown facet '{facet}'"
-                            ))
-                        })?;
-                    Source::Facet(facet_id)
-                }
-            };
+                    RawManagedFile::Facet { facet } => {
+                        let facet_id = facets.get_index_of(facet.as_ref()).map(FacetId).context(
+                            format_args!("file '{path}' references unknown facet '{facet}'"),
+                        )?;
+                        Source::Facet(facet_id)
+                    }
+                };
             files.push(ManagedFile { path, source });
         }
 
         let mut effects = Vec::with_capacity(raw.effects.len());
         for (name, raw_effect) in raw.effects {
             if name.is_empty() {
-                return Err(ParseError::Invalid(
-                    "effect name must not be empty".to_string(),
-                ));
+                return Err(error!("effect name must not be empty"));
             }
 
             let mut on = Vec::with_capacity(raw_effect.on.len());
             for facet in raw_effect.on {
-                let facet_id = facets
-                    .get_index_of(facet.as_ref())
-                    .map(FacetId)
-                    .ok_or_else(|| {
-                        ParseError::Invalid(format!(
+                let facet_id =
+                    facets
+                        .get_index_of(facet.as_ref())
+                        .map(FacetId)
+                        .context(format_args!(
                             "effect '{name}' runs on unknown facet '{facet}'"
-                        ))
-                    })?;
+                        ))?;
                 on.push(facet_id);
             }
 
-            let exec = match raw_effect.exec {
-                RawEffectExec::Static(argv) => EffectExec::Static(parse_argv(&name, argv)?),
-                RawEffectExec::Facet {
-                    facet,
-                    mut variants,
-                } => {
-                    let facet_id = facets
-                        .get_index_of(facet.as_ref())
-                        .map(FacetId)
-                        .ok_or_else(|| {
-                            ParseError::Invalid(format!(
+            let exec =
+                match raw_effect.exec {
+                    RawEffectExec::Static(argv) => EffectExec::Static(parse_argv(&name, argv)?),
+                    RawEffectExec::Facet {
+                        facet,
+                        mut variants,
+                    } => {
+                        let facet_id = facets.get_index_of(facet.as_ref()).map(FacetId).context(
+                            format_args!(
                                 "effect '{name}' command references unknown facet '{facet}'"
-                            ))
-                        })?;
-                    if on.as_slice() != [facet_id] {
-                        return Err(ParseError::Invalid(format!(
-                            "effect '{name}' with a facet command must set on = ['{facet}']"
-                        )));
-                    }
+                            ),
+                        )?;
+                        if on.as_slice() != [facet_id] {
+                            return Err(error!(
+                                "effect '{name}' with a facet command must set on = ['{facet}']"
+                            ));
+                        }
 
-                    let definition = &facets.get_index(facet_id.0).unwrap().1;
-                    if variants.len() != definition.variants.len()
-                        || variants
-                            .keys()
-                            .any(|variant| !definition.variants.contains_key(variant.as_ref()))
-                    {
-                        return Err(ParseError::Invalid(format!(
-                            "effect '{name}' command variants do not match facet '{facet}'"
-                        )));
-                    }
-                    let mut commands = Vec::with_capacity(variants.len());
-                    for variant in definition.variants.keys() {
-                        let argv = variants.shift_remove(variant.as_ref()).ok_or_else(|| {
-                            ParseError::Invalid(format!(
+                        let definition = &facets.get_index(facet_id.0).unwrap().1;
+                        if variants.len() != definition.variants.len()
+                            || variants
+                                .keys()
+                                .any(|variant| !definition.variants.contains_key(variant.as_ref()))
+                        {
+                            return Err(error!(
                                 "effect '{name}' command variants do not match facet '{facet}'"
-                            ))
-                        })?;
-                        commands.push(parse_argv(&name, argv)?);
+                            ));
+                        }
+                        let mut commands = Vec::with_capacity(variants.len());
+                        for variant in definition.variants.keys() {
+                            let argv =
+                                variants
+                                    .shift_remove(variant.as_ref())
+                                    .context(format_args!(
+                                "effect '{name}' command variants do not match facet '{facet}'"
+                            ))?;
+                            commands.push(parse_argv(&name, argv)?);
+                        }
+                        EffectExec::Facet {
+                            facet: facet_id,
+                            variants: commands.into_boxed_slice(),
+                        }
                     }
-                    EffectExec::Facet {
-                        facet: facet_id,
-                        variants: commands.into_boxed_slice(),
-                    }
-                }
-            };
+                };
             effects.push(Effect {
                 name,
                 on: on.into_boxed_slice(),
@@ -271,24 +237,20 @@ impl Config {
         )
     }
 
-    pub fn parse_selection(&self, raw: RawSelection) -> Result<Selection, AppError> {
+    pub fn parse_selection(&self, raw: RawSelection) -> crate::Result<Selection> {
         if raw.len() != self.facets.len() {
-            return Err(AppError::InvalidState(
-                "selection does not contain every manifest facet".to_string(),
-            ));
+            return Err(error!("selection does not contain every manifest facet"));
         }
 
         let mut selection = self.default_selection();
         for (name, value) in raw {
-            let facet_id = self.facet_id(&name).ok_or_else(|| {
-                AppError::InvalidState(format!("selection contains unknown facet '{name}'"))
-            })?;
+            let facet_id = self
+                .facet_id(&name)
+                .context(format_args!("selection contains unknown facet '{name}'"))?;
             let facet = &self[facet_id];
-            let variant_id = facet.variant_id(&value).ok_or_else(|| {
-                AppError::InvalidState(format!(
-                    "selection contains invalid value '{value}' for facet '{name}'"
-                ))
-            })?;
+            let variant_id = facet.variant_id(&value).context(format_args!(
+                "selection contains invalid value '{value}' for facet '{name}'"
+            ))?;
             selection[facet_id] = variant_id;
         }
 
@@ -380,7 +342,7 @@ pub struct NamedSelection<'a> {
 }
 
 impl Serialize for NamedSelection<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -394,37 +356,31 @@ impl Serialize for NamedSelection<'_> {
     }
 }
 
-fn validate_facet_name(name: &str) -> Result<(), ParseError> {
+fn validate_facet_name(name: &str) -> crate::Result<()> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') {
-        return Err(ParseError::Invalid(format!(
-            "facet name '{name}' must be one path segment"
-        )));
+        return Err(error!("facet name '{name}' must be one path segment"));
     }
     Ok(())
 }
 
-fn validate_managed_path(path: &str) -> Result<(), ParseError> {
+fn validate_managed_path(path: &str) -> crate::Result<()> {
     if path
         .split('/')
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
-        return Err(ParseError::Invalid(format!(
+        return Err(error!(
             "managed file path '{path}' must be a normalized relative path"
-        )));
+        ));
     }
     Ok(())
 }
 
-fn parse_argv(name: &str, argv: Vec<Box<str>>) -> Result<Argv, ParseError> {
+fn parse_argv(name: &str, argv: Vec<Box<str>>) -> crate::Result<Argv> {
     let Some(executable) = argv.first() else {
-        return Err(ParseError::Invalid(format!(
-            "effect '{name}' command is empty"
-        )));
+        return Err(error!("effect '{name}' command is empty"));
     };
     if !Path::new(executable.as_ref()).is_absolute() {
-        return Err(ParseError::Invalid(format!(
-            "effect '{name}' executable must be absolute"
-        )));
+        return Err(error!("effect '{name}' executable must be absolute"));
     }
     Ok(argv.into_boxed_slice())
 }
@@ -509,7 +465,7 @@ mod tests {
         }
     }"#;
 
-    fn parse(value: serde_json::Value) -> Result<Config, ParseError> {
+    fn parse(value: serde_json::Value) -> crate::Result<Config> {
         let encoded = serde_json::to_vec(&value).unwrap();
         Config::parse(encoded.as_slice())
     }
@@ -553,18 +509,18 @@ mod tests {
     fn rejects_invalid_defaults_and_references_during_parse() {
         let mut value = valid_config();
         value["facets"]["theme"]["default"] = json!("missing");
-        assert!(matches!(parse(value), Err(ParseError::Invalid(_))));
+        assert!(parse(value).is_err());
 
         let mut value = valid_config();
         value["files"][".config/app"]["facet"] = json!("missing");
-        assert!(matches!(parse(value), Err(ParseError::Invalid(_))));
+        assert!(parse(value).is_err());
 
         let mut value = valid_config();
         value["effects"]["reload"]["exec"]["variants"]
             .as_object_mut()
             .unwrap()
             .remove("dark");
-        assert!(matches!(parse(value), Err(ParseError::Invalid(_))));
+        assert!(parse(value).is_err());
     }
 
     #[test]
@@ -574,7 +530,7 @@ mod tests {
             let files = value["files"].as_object_mut().unwrap();
             files.clear();
             files.insert(path.to_string(), json!({"facet": "theme"}));
-            assert!(matches!(parse(value), Err(ParseError::Invalid(_))));
+            assert!(parse(value).is_err());
         }
     }
 }
