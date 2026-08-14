@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_names_to_dense_ids() {
+    fn resolves_manifest_and_selection() {
         let config = Config::parse(VALID_CONFIG.as_bytes()).unwrap();
         let theme = config.facet_id("theme").unwrap();
         let facet = &config[theme];
@@ -443,14 +443,8 @@ mod tests {
             EffectExec::Facet { facet, variants }
                 if *facet == theme && variants[VariantId(1).0][1].as_ref() == "dark"
         ));
-    }
-
-    #[test]
-    fn selection_names_exist_only_at_the_state_boundary() {
-        let config = Config::parse(VALID_CONFIG.as_bytes()).unwrap();
         let raw: RawSelection = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
         let selection = config.parse_selection(raw).unwrap();
-        let theme = config.facet_id("theme").unwrap();
 
         assert_eq!(selection[theme], VariantId(0));
         assert_eq!(
@@ -464,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_defaults_and_references_during_parse() {
+    fn rejects_invalid_manifest() {
         let mut value = valid_config();
         value["facets"]["theme"]["default"] = json!("missing");
         assert!(parse(value).is_err());
@@ -479,10 +473,7 @@ mod tests {
             .unwrap()
             .remove("dark");
         assert!(parse(value).is_err());
-    }
 
-    #[test]
-    fn rejects_unsafe_managed_paths_during_parse() {
         for path in ["../outside", "/absolute", "a//b", "a/./b"] {
             let mut value = valid_config();
             let files = value["files"].as_object_mut().unwrap();

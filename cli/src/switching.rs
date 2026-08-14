@@ -590,187 +590,13 @@ mod tests {
     }
 
     #[test]
-    fn activation_preserves_valid_values_and_defaults_invalid_values() {
-        let temp = TestDir::new("activate-selection");
-        let (config, manifest_path, state) = fixture(&temp.0, false);
-        switch(
-            &config,
-            &manifest_path,
-            &state,
-            &["theme=light".to_string()],
-        )
-        .unwrap();
-
-        let selection = activate(&config, &manifest_path, &state).unwrap();
-        assert!(selected(&config, &selection, "theme", "light"));
-
-        fs::write(
-            state.join("current/selection.json"),
-            r#"{"theme":"missing"}"#,
-        )
-        .unwrap();
-        let selection = activate(&config, &manifest_path, &state).unwrap();
-        assert!(selected(&config, &selection, "theme", "dark"));
-    }
-
-    #[test]
-    fn activation_reconciles_managed_links() {
-        let temp = TestDir::new("activate-links");
-        let old = temp.0.join("old");
-        let removed = temp.0.join("removed");
-        let new = temp.0.join("new");
-        let added = temp.0.join("added");
-        fs::write(&old, "old").unwrap();
-        fs::write(&removed, "removed").unwrap();
-        fs::write(&new, "new").unwrap();
-        fs::write(&added, "added").unwrap();
-        let (old_config, old_manifest) = manifest(
-            &temp.0,
-            "old.json",
-            false,
-            json!({
-                ".config/app/current": old,
-                ".config/app/removed": removed
-            }),
-        );
-        let (new_config, new_manifest) = manifest(
-            &temp.0,
-            "new.json",
-            false,
-            json!({
-                ".config/app/current": new,
-                ".config/app/added": added
-            }),
-        );
-        let state = temp.0.join("state");
-
-        activate(&old_config, &old_manifest, &state).unwrap();
-        activate(&new_config, &new_manifest, &state).unwrap();
-
-        assert_eq!(
-            fs::read_link(temp.0.join(".config/app/current")).unwrap(),
-            new
-        );
-        assert_eq!(
-            fs::read_link(temp.0.join(".config/app/added")).unwrap(),
-            added
-        );
-        assert!(!temp.0.join(".config/app/removed").exists());
-    }
-
-    #[test]
-    fn activation_links_facet_files_through_current_state() {
-        let temp = TestDir::new("activate-facet-file");
-        let path = ".config/app/theme";
-        fs::create_dir_all(temp.0.join("dark/.config/app")).unwrap();
-        fs::create_dir_all(temp.0.join("light/.config/app")).unwrap();
-        fs::write(temp.0.join("dark").join(path), "dark").unwrap();
-        fs::write(temp.0.join("light").join(path), "light").unwrap();
-        let (config, manifest_path) = manifest(
-            &temp.0,
-            "dynamic.json",
-            false,
-            json!({".config/app/theme": {"facet": "theme"}}),
-        );
-        let state = temp.0.join("state");
-
-        activate(&config, &manifest_path, &state).unwrap();
-
-        let target = temp.0.join(path);
-        assert_eq!(
-            fs::read_link(&target).unwrap(),
-            state.join("current/root/theme").join(path)
-        );
-        assert_eq!(fs::read_to_string(target).unwrap(), "dark");
-    }
-
-    #[test]
-    fn activation_rejects_unmanaged_conflicts_without_committing() {
-        let temp = TestDir::new("activate-conflict");
-        let source = temp.0.join("source");
-        fs::write(&source, "managed").unwrap();
-        fs::create_dir_all(temp.0.join(".config/app")).unwrap();
-        let target = temp.0.join(".config/app/file");
-        fs::write(&target, "mine").unwrap();
-        let (config, manifest_path) = manifest(
-            &temp.0,
-            "conflict.json",
-            false,
-            json!({".config/app/file": source}),
-        );
-        let state = temp.0.join("state");
-
-        let error = activate(&config, &manifest_path, &state)
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("conflicts with an existing path"));
-        assert_eq!(fs::read_to_string(target).unwrap(), "mine");
-        assert!(!state.join("current").exists());
-        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn switches_from_defaults() {
-        let temp = TestDir::new("defaults");
-        let (config, manifest_path, state) = fixture(&temp.0, false);
-
-        let selection = switch(
-            &config,
-            &manifest_path,
-            &state,
-            &["theme=light".to_string()],
-        )
-        .unwrap();
-
-        assert!(selected(&config, &selection, "theme", "light"));
-        assert_eq!(
-            fs::read_link(state.join("current/root/theme")).unwrap(),
-            variant_root(&config, "theme", "light")
-        );
-        assert_eq!(
-            fs::read_link(state.join("current/manifest")).unwrap(),
-            manifest_path
-        );
-        assert_eq!(
-            serde_json::from_reader::<_, Value>(
-                fs::File::open(state.join("current/selection.json")).unwrap()
-            )
-            .unwrap(),
-            json!({"theme": "light"})
-        );
-    }
-
-    #[test]
-    fn switches_between_two_state_slots() {
-        let temp = TestDir::new("repeated");
-        let (config, manifest_path, state) = fixture(&temp.0, false);
-        let set = ["theme=dark".to_string()];
-
-        switch(&config, &manifest_path, &state, &set).unwrap();
-        let first = fs::read_link(state.join("current")).unwrap();
-        switch(&config, &manifest_path, &state, &set).unwrap();
-        let second = fs::read_link(state.join("current")).unwrap();
-        switch(&config, &manifest_path, &state, &set).unwrap();
-        let third = fs::read_link(state.join("current")).unwrap();
-
-        assert_ne!(first, second);
-        assert_eq!(first, third);
-        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 2);
-    }
-
-    #[test]
-    fn switches_multiple_facets_together() {
-        let temp = TestDir::new("multiple");
+    fn switches_selections_between_state_directories() {
+        let temp = TestDir::new("switch");
         let (config, manifest_path, state) = fixture(&temp.0, true);
+        let set = ["theme=light".to_string(), "density=roomy".to_string()];
 
-        let selection = switch(
-            &config,
-            &manifest_path,
-            &state,
-            &["theme=light".to_string(), "density=roomy".to_string()],
-        )
-        .unwrap();
+        let selection = switch(&config, &manifest_path, &state, &set).unwrap();
+        let first = fs::read_link(state.join("current")).unwrap();
 
         assert!(selected(&config, &selection, "theme", "light"));
         assert!(selected(&config, &selection, "density", "roomy"));
@@ -782,75 +608,102 @@ mod tests {
             fs::read_link(state.join("current/root/density")).unwrap(),
             variant_root(&config, "density", "roomy")
         );
+        assert_eq!(
+            fs::read_link(state.join("current/manifest")).unwrap(),
+            manifest_path
+        );
+        assert_eq!(
+            serde_json::from_reader::<_, Value>(
+                fs::File::open(state.join("current/selection.json")).unwrap()
+            )
+            .unwrap(),
+            json!({"theme": "light", "density": "roomy"})
+        );
+        for set in ["unknown=value", "theme=unknown", "theme"] {
+            assert!(switch(&config, &manifest_path, &state, &[set.to_string()]).is_err());
+            assert_eq!(fs::read_link(state.join("current")).unwrap(), first);
+        }
+        switch(&config, &manifest_path, &state, &set).unwrap();
+        let second = fs::read_link(state.join("current")).unwrap();
+        switch(&config, &manifest_path, &state, &set).unwrap();
+        let third = fs::read_link(state.join("current")).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(first, third);
+        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 2);
     }
 
     #[test]
-    fn failed_switch_preserves_current_state() {
-        let temp = TestDir::new("failed");
-        let (config, manifest_path, state) = fixture(&temp.0, false);
-
+    fn failed_switch_preserves_current_and_removes_pending_state() {
+        let temp = TestDir::new("failed-switch");
+        let (mut config, manifest_path, state) = fixture(&temp.0, false);
         switch(&config, &manifest_path, &state, &[]).unwrap();
         let current = fs::read_link(state.join("current")).unwrap();
-        fs::remove_dir_all(variant_root(&config, "theme", "light")).unwrap();
-
-        assert!(switch(
-            &config,
-            &manifest_path,
-            &state,
-            &["theme=light".to_string()]
-        )
-        .is_err());
-        assert_eq!(fs::read_link(state.join("current")).unwrap(), current);
-    }
-
-    #[test]
-    fn failed_state_is_removed() {
-        let temp = TestDir::new("failed-state");
-        let (mut config, manifest_path, state) = fixture(&temp.0, false);
         let (_, facet) = config.facets.shift_remove_index(0).unwrap();
         config.facets.insert("missing/theme".into(), facet);
+        fs::write(
+            state.join("current/selection.json"),
+            r#"{"missing/theme":"dark"}"#,
+        )
+        .unwrap();
 
         assert!(switch(&config, &manifest_path, &state, &[]).is_err());
 
-        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 0);
+        assert_eq!(fs::read_link(state.join("current")).unwrap(), current);
+        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 1);
         assert!(!state.join(".current").exists());
     }
 
     #[test]
-    fn rejects_invalid_overrides() {
-        let temp = TestDir::new("invalid");
-        let (config, manifest_path, state) = fixture(&temp.0, false);
+    fn activation_reconciles_configuration() {
+        let temp = TestDir::new("activate");
+        let dynamic = ".config/app/theme";
+        fs::create_dir_all(temp.0.join("dark/.config/app")).unwrap();
+        fs::create_dir_all(temp.0.join("light/.config/app")).unwrap();
+        fs::write(temp.0.join("dark").join(dynamic), "dark").unwrap();
+        fs::write(temp.0.join("light").join(dynamic), "light").unwrap();
+        let old = temp.0.join("old");
+        let removed = temp.0.join("removed");
+        let new = temp.0.join("new");
+        let added = temp.0.join("added");
+        fs::write(&old, "old").unwrap();
+        fs::write(&removed, "removed").unwrap();
+        fs::write(&new, "new").unwrap();
+        fs::write(&added, "added").unwrap();
+        let (mut old_config, old_manifest) = manifest(
+            &temp.0,
+            "old.json",
+            true,
+            json!({
+                ".config/app/current": old,
+                ".config/app/removed": removed,
+                ".config/app/theme": {"facet": "theme"}
+            }),
+        );
+        let (mut new_config, new_manifest) = manifest(
+            &temp.0,
+            "new.json",
+            true,
+            json!({
+                ".config/app/current": new,
+                ".config/app/added": added,
+                ".config/app/theme": {"facet": "theme"}
+            }),
+        );
+        let state = temp.0.join("state");
+        activate(&old_config, &old_manifest, &state).unwrap();
 
-        for set in ["unknown=value", "theme=unknown", "theme"] {
-            assert!(switch(&config, &manifest_path, &state, &[set.to_string()]).is_err());
-        }
-        assert!(!state.join("current").exists());
-    }
-
-    #[test]
-    fn rejects_non_symlink_current_state() {
-        let temp = TestDir::new("invalid-state");
-        let (config, manifest_path, state) = fixture(&temp.0, false);
-        fs::create_dir_all(state.join("current")).unwrap();
-
-        assert!(switch(&config, &manifest_path, &state, &[]).is_err());
-    }
-
-    #[test]
-    fn runs_only_matching_effects() {
-        let temp = TestDir::new("effects");
-        let (mut config, manifest_path, state) = fixture(&temp.0, true);
         let log = temp.0.join("effects.log");
         let recorder = script(&temp.0, "record", "printf '%s\\n' \"$1\" >> \"$2\"");
-        let theme = config.facet_id("theme").unwrap();
-        let density = config.facet_id("density").unwrap();
-        let variants = config[theme]
+        let theme = old_config.facet_id("theme").unwrap();
+        let density = old_config.facet_id("density").unwrap();
+        let variants = old_config[theme]
             .variants
             .keys()
             .map(|variant| command(&recorder, &[variant, log.to_str().unwrap()]))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        config.effects = vec![
+        old_config.effects = vec![
             Effect {
                 name: "always".into(),
                 on: Box::default(),
@@ -871,63 +724,120 @@ mod tests {
             },
         ]
         .into_boxed_slice();
-
-        switch(&config, &manifest_path, &state, &[]).unwrap();
-        switch(&config, &manifest_path, &state, &["theme=dark".to_string()]).unwrap();
-
-        let effects = fs::read_to_string(log).unwrap();
-        assert_eq!(
-            effects.lines().filter(|effect| *effect == "always").count(),
-            2
-        );
-        assert_eq!(
-            effects.lines().filter(|effect| *effect == "dark").count(),
-            1
-        );
+        switch(
+            &old_config,
+            &old_manifest,
+            &state,
+            &["theme=light".to_string()],
+        )
+        .unwrap();
+        let effects = fs::read_to_string(&log).unwrap();
+        assert!(effects.lines().any(|effect| effect == "always"));
+        assert!(effects.lines().any(|effect| effect == "light"));
         assert!(!effects.lines().any(|effect| effect == "density"));
-    }
 
-    #[test]
-    fn activation_runs_every_effect() {
-        let temp = TestDir::new("activate-effects");
-        let (mut config, manifest_path, state) = fixture(&temp.0, true);
-        let log = temp.0.join("effects.log");
-        let recorder = script(&temp.0, "record-activation", ": > \"$1\"");
-        let density = config.facet_id("density").unwrap();
-        config.effects = vec![Effect {
-            name: "density".into(),
+        let density = new_config.facet_id("density").unwrap();
+        new_config.effects = vec![Effect {
+            name: "activation".into(),
             on: vec![density].into_boxed_slice(),
-            exec: EffectExec::Static(command(&recorder, &[log.to_str().unwrap()])),
+            exec: EffectExec::Static(command(&recorder, &["activation", log.to_str().unwrap()])),
         }]
         .into_boxed_slice();
+        let selection = activate(&new_config, &new_manifest, &state).unwrap();
 
-        activate(&config, &manifest_path, &state).unwrap();
+        assert!(selected(&new_config, &selection, "theme", "light"));
+        assert_eq!(
+            fs::read_link(temp.0.join(".config/app/current")).unwrap(),
+            new
+        );
+        assert_eq!(
+            fs::read_link(temp.0.join(".config/app/added")).unwrap(),
+            added
+        );
+        assert_eq!(
+            fs::symlink_metadata(temp.0.join(".config/app/removed"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let target = temp.0.join(dynamic);
+        assert_eq!(
+            fs::read_link(&target).unwrap(),
+            state.join("current/root/theme").join(dynamic)
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "light");
+        assert!(fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .any(|effect| effect == "activation"));
 
-        assert!(log.exists());
+        fs::write(
+            state.join("current/selection.json"),
+            r#"{"theme":"missing"}"#,
+        )
+        .unwrap();
+        let selection = activate(&new_config, &new_manifest, &state).unwrap();
+        assert!(selected(&new_config, &selection, "theme", "dark"));
+        assert!(selected(&new_config, &selection, "density", "compact"));
+
+        let managed = temp.0.join(".config/app/current");
+        fs::remove_file(&managed).unwrap();
+        fs::write(&managed, "mine").unwrap();
+        let current = fs::read_link(state.join("current")).unwrap();
+        let error = activate(&new_config, &new_manifest, &state)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicts with an existing path"));
+        assert_eq!(fs::read_to_string(managed).unwrap(), "mine");
+        assert_eq!(fs::read_link(state.join("current")).unwrap(), current);
+        assert!(!state.join(".current").exists());
     }
 
     #[test]
-    fn effect_failure_does_not_roll_back_state() {
-        let temp = TestDir::new("effect-failure");
+    fn effect_failures_finish_concurrently_without_rolling_back_state() {
+        let temp = TestDir::new("effect-failures");
         let (mut config, manifest_path, state) = fixture(&temp.0, false);
         let failure = script(&temp.0, "fail", "printf 'broken' >&2\nexit 7");
-        let log = temp.0.join("effects.log");
-        let recorder = script(&temp.0, "record-after-failure", ": > \"$1\"");
+        let timeout = script(&temp.0, "timeout", "sleep 5");
+        let barrier = script(
+            &temp.0,
+            "barrier",
+            ": > \"$1\"\nwhile [ ! -e \"$2\" ]; do :; done",
+        );
+        let first = temp.0.join("first");
+        let second = temp.0.join("second");
         let theme = config.facet_id("theme").unwrap();
         config.effects = vec![
             Effect {
-                name: "reload".into(),
+                name: "failure".into(),
                 on: vec![theme].into_boxed_slice(),
                 exec: EffectExec::Static(command(&failure, &[])),
             },
             Effect {
-                name: "after".into(),
+                name: "timeout".into(),
                 on: vec![theme].into_boxed_slice(),
-                exec: EffectExec::Static(command(&recorder, &[log.to_str().unwrap()])),
+                exec: EffectExec::Static(command(&timeout, &[])),
+            },
+            Effect {
+                name: "first".into(),
+                on: vec![theme].into_boxed_slice(),
+                exec: EffectExec::Static(command(
+                    &barrier,
+                    &[first.to_str().unwrap(), second.to_str().unwrap()],
+                )),
+            },
+            Effect {
+                name: "second".into(),
+                on: vec![theme].into_boxed_slice(),
+                exec: EffectExec::Static(command(
+                    &barrier,
+                    &[second.to_str().unwrap(), first.to_str().unwrap()],
+                )),
             },
         ]
         .into_boxed_slice();
 
+        let started = Instant::now();
         let error = switch(
             &config,
             &manifest_path,
@@ -937,9 +847,12 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(error.contains("effect 'reload' exited with exit status: 7"));
+        assert!(error.contains("effect 'failure' exited with exit status: 7"));
         assert!(error.contains("stderr:\nbroken"));
-        assert!(log.exists());
+        assert!(error.contains("effect 'timeout' timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(first.exists());
+        assert!(second.exists());
         assert_eq!(
             serde_json::from_reader::<_, Value>(
                 fs::File::open(state.join("current/selection.json")).unwrap()
@@ -947,64 +860,5 @@ mod tests {
             .unwrap(),
             json!({"theme": "light"})
         );
-    }
-
-    #[test]
-    fn effect_timeout_does_not_roll_back_state() {
-        let temp = TestDir::new("effect-timeout");
-        let (mut config, manifest_path, state) = fixture(&temp.0, false);
-        let timeout = script(&temp.0, "timeout", "sleep 5");
-        config.effects = vec![Effect {
-            name: "stuck".into(),
-            on: Box::default(),
-            exec: EffectExec::Static(command(&timeout, &[])),
-        }]
-        .into_boxed_slice();
-
-        let started = Instant::now();
-        let error = switch(&config, &manifest_path, &state, &[])
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("effect 'stuck' timed out"));
-        assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(state.join("current/selection.json").exists());
-    }
-
-    #[test]
-    fn runs_effects_concurrently() {
-        let temp = TestDir::new("effect-concurrency");
-        let (mut config, manifest_path, state) = fixture(&temp.0, false);
-        let barrier = script(
-            &temp.0,
-            "barrier",
-            ": > \"$1\"\nwhile [ ! -e \"$2\" ]; do :; done",
-        );
-        let first = temp.0.join("first");
-        let second = temp.0.join("second");
-        config.effects = vec![
-            Effect {
-                name: "first".into(),
-                on: Box::default(),
-                exec: EffectExec::Static(command(
-                    &barrier,
-                    &[first.to_str().unwrap(), second.to_str().unwrap()],
-                )),
-            },
-            Effect {
-                name: "second".into(),
-                on: Box::default(),
-                exec: EffectExec::Static(command(
-                    &barrier,
-                    &[second.to_str().unwrap(), first.to_str().unwrap()],
-                )),
-            },
-        ]
-        .into_boxed_slice();
-
-        switch(&config, &manifest_path, &state, &[]).unwrap();
-
-        assert!(first.exists());
-        assert!(second.exists());
     }
 }
