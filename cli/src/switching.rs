@@ -3,7 +3,6 @@ use crate::manifest::{Config, NamedSelection, RawSelection, Selection};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn switch(
     config: &Config,
@@ -31,8 +30,10 @@ pub fn switch(
     ))?;
 
     let current = state_dir.join("current");
-    let mut selection = match fs::symlink_metadata(&current) {
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => config.default_selection(),
+    let (mut selection, slot) = match fs::symlink_metadata(&current) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            (config.default_selection(), "0")
+        }
         Err(context) => {
             return Err(Error::context(
                 format_args!("could not inspect current pointer '{}'", current.display()),
@@ -43,6 +44,21 @@ pub fn switch(
             return Err(error!("'{}' is not a symlink", current.display()))
         }
         Ok(_) => {
+            let target = fs::read_link(&current).context(format_args!(
+                "could not read current pointer '{}'",
+                current.display()
+            ))?;
+            let slot = match target.as_path() {
+                path if path == Path::new("states/0") => "1",
+                path if path == Path::new("states/1") => "0",
+                _ => {
+                    return Err(error!(
+                        "current pointer '{}' has invalid target '{}'",
+                        current.display(),
+                        target.display()
+                    ))
+                }
+            };
             let path = current.join("selection.json");
             let file = fs::File::open(&path).context(format_args!(
                 "could not open current selection '{}'",
@@ -50,7 +66,7 @@ pub fn switch(
             ))?;
             let raw: RawSelection = serde_json::from_reader(file)
                 .context(format_args!("could not parse JSON at '{}'", path.display()))?;
-            config.parse_selection(raw)?
+            (config.parse_selection(raw)?, slot)
         }
     };
 
@@ -96,43 +112,45 @@ pub fn switch(
         }
     }
 
-    let generations_dir = state_dir.join("generations");
-    fs::create_dir_all(&generations_dir).context(format_args!(
-        "could not create generations directory '{}'",
-        generations_dir.display()
+    let states_dir = state_dir.join("states");
+    fs::create_dir_all(&states_dir).context(format_args!(
+        "could not create states directory '{}'",
+        states_dir.display()
     ))?;
-    let generation_id = format!(
-        "{}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-        std::process::id()
-    );
-    let generation_dir = generations_dir.join(&generation_id);
-    fs::create_dir(&generation_dir).context(format_args!(
-        "could not create runtime generation '{}'",
-        generation_dir.display()
+    let state = states_dir.join(slot);
+    match fs::remove_dir_all(&state) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(context) => {
+            return Err(Error::context(
+                format_args!("could not clear inactive state '{}'", state.display()),
+                context,
+            ))
+        }
+    }
+    fs::create_dir(&state).context(format_args!(
+        "could not create runtime state '{}'",
+        state.display()
     ))?;
-    let mut pending = PendingGeneration {
-        path: generation_dir,
+    let mut pending = PendingState {
+        path: state,
         pointer: current_tmp,
         committed: false,
     };
 
     let root_dir = pending.path.join("root");
     fs::create_dir(&root_dir).context(format_args!(
-        "could not create generation roots '{}'",
+        "could not create state roots '{}'",
         root_dir.display()
     ))?;
-    let generation_manifest = pending.path.join("manifest");
-    symlink(manifest_path, &generation_manifest).context(format_args!(
-        "could not link generation manifest '{}'",
-        generation_manifest.display()
+    let state_manifest = pending.path.join("manifest");
+    symlink(manifest_path, &state_manifest).context(format_args!(
+        "could not link state manifest '{}'",
+        state_manifest.display()
     ))?;
     let selection_path = pending.path.join("selection.json");
     let selection_file = fs::File::create(&selection_path).context(format_args!(
-        "could not create generation selection '{}'",
+        "could not create state selection '{}'",
         selection_path.display()
     ))?;
     serde_json::to_writer_pretty(
@@ -154,11 +172,7 @@ pub fn switch(
         ))?;
     }
 
-    symlink(
-        PathBuf::from("generations").join(&generation_id),
-        &pending.pointer,
-    )
-    .context(format_args!(
+    symlink(PathBuf::from("states").join(slot), &pending.pointer).context(format_args!(
         "could not create current pointer '{}'",
         pending.pointer.display()
     ))?;
@@ -178,17 +192,31 @@ pub fn switch(
     Ok(selection)
 }
 
-struct PendingGeneration {
+struct PendingState {
     path: PathBuf,
     pointer: PathBuf,
     committed: bool,
 }
 
-impl Drop for PendingGeneration {
+impl Drop for PendingState {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = fs::remove_file(&self.pointer);
-            let _ = fs::remove_dir_all(&self.path);
+            if let Err(error) = fs::remove_file(&self.pointer) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "sumi: warning: could not remove pending pointer '{}': {error}",
+                        self.pointer.display()
+                    );
+                }
+            }
+            if let Err(error) = fs::remove_dir_all(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "sumi: warning: could not remove pending state '{}': {error}",
+                        self.path.display()
+                    );
+                }
+            }
         }
     }
 }
@@ -318,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_selection_creates_a_new_generation() {
+    fn switches_between_two_state_slots() {
         let temp = TestDir::new("repeated");
         let (config, manifest_path, state) = fixture(&temp.0, false);
         let set = ["theme=dark".to_string()];
@@ -327,8 +355,12 @@ mod tests {
         let first = fs::read_link(state.join("current")).unwrap();
         switch(&config, &manifest_path, &state, &set).unwrap();
         let second = fs::read_link(state.join("current")).unwrap();
+        switch(&config, &manifest_path, &state, &set).unwrap();
+        let third = fs::read_link(state.join("current")).unwrap();
 
         assert_ne!(first, second);
+        assert_eq!(first, third);
+        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 2);
     }
 
     #[test]
@@ -357,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_switch_preserves_current_generation() {
+    fn failed_switch_preserves_current_state() {
         let temp = TestDir::new("failed");
         let (config, manifest_path, state) = fixture(&temp.0, false);
 
@@ -376,15 +408,15 @@ mod tests {
     }
 
     #[test]
-    fn failed_generation_is_removed() {
-        let temp = TestDir::new("failed-generation");
+    fn failed_state_is_removed() {
+        let temp = TestDir::new("failed-state");
         let (mut config, manifest_path, state) = fixture(&temp.0, false);
         let (_, facet) = config.facets.shift_remove_index(0).unwrap();
         config.facets.insert("missing/theme".into(), facet);
 
         assert!(switch(&config, &manifest_path, &state, &[]).is_err());
 
-        assert_eq!(fs::read_dir(state.join("generations")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 0);
         assert!(!state.join(".current").exists());
     }
 
@@ -460,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_failure_does_not_roll_back_generation() {
+    fn effect_failure_does_not_roll_back_state() {
         let temp = TestDir::new("effect-failure");
         let (mut config, manifest_path, state) = fixture(&temp.0, false);
         let failure = script(&temp.0, "fail", "printf 'broken' >&2\nexit 7");
@@ -503,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_timeout_does_not_roll_back_generation() {
+    fn effect_timeout_does_not_roll_back_state() {
         let temp = TestDir::new("effect-timeout");
         let (mut config, manifest_path, state) = fixture(&temp.0, false);
         let timeout = script(&temp.0, "timeout", "sleep 5");
