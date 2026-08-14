@@ -33,7 +33,7 @@ pub fn run<'a>(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context(format_args!("could not start effect '{}'", effect.name))
+            .context(format_args!("effect '{}'", effect.name))
         {
             Ok(child) => child,
             Err(error) => {
@@ -46,10 +46,7 @@ pub fn run<'a>(
         if let Err(context) = nonblocking(&stdout).and_then(|()| nonblocking(&stderr)) {
             let _ = terminate(&mut child);
             results[result] = Some(Err(Error::context(
-                format_args!(
-                    "could not configure output capture for effect '{}'",
-                    effect.name
-                ),
+                format_args!("effect '{}' output", effect.name),
                 context,
             )));
             continue;
@@ -121,7 +118,7 @@ pub fn run<'a>(
                         let _ = terminate(&mut process.child);
                     }
                 }
-                return Err(Error::context("could not poll effects", context));
+                return Err(Error::context("effects", context));
             }
         }
 
@@ -132,7 +129,7 @@ pub fn run<'a>(
             let completion = if ready[index].0 {
                 process.stdout.drain().err().map(|context| {
                     Completion::Failed(Error::context(
-                        format_args!("could not capture stdout from effect '{}'", effect.name),
+                        format_args!("effect '{}' stdout", effect.name),
                         context,
                     ))
                 })
@@ -145,7 +142,7 @@ pub fn run<'a>(
                 }
                 process.stderr.drain().err().map(|context| {
                     Completion::Failed(Error::context(
-                        format_args!("could not capture stderr from effect '{}'", effect.name),
+                        format_args!("effect '{}' stderr", effect.name),
                         context,
                     ))
                 })
@@ -157,7 +154,7 @@ pub fn run<'a>(
                     Ok(None) if process.started.elapsed() >= TIMEOUT => Some(Completion::TimedOut),
                     Ok(None) => None,
                     Err(context) => Some(Completion::Failed(Error::context(
-                        format_args!("could not wait for effect '{}'", effect.name),
+                        format_args!("effect '{}'", effect.name),
                         context,
                     ))),
                 },
@@ -174,7 +171,7 @@ pub fn run<'a>(
                 Completion::TimedOut => match terminate(&mut process.child) {
                     Ok(status) => finish(effect.name, process, status, true, effect.ignore_failure),
                     Err(context) => Err(Error::context(
-                        format_args!("could not terminate effect '{}'", effect.name),
+                        format_args!("effect '{}'", effect.name),
                         context,
                     )),
                 },
@@ -203,10 +200,7 @@ pub fn run<'a>(
         context.push('\n');
         std::fmt::write(&mut context, format_args!("- {failure}")).unwrap();
     }
-    Err(Error::context(
-        format_args!("{count} effects failed"),
-        context,
-    ))
+    Err(Error::context(format_args!("{count} effects"), context))
 }
 
 #[cfg(not(test))]
@@ -305,12 +299,14 @@ fn finish(
     timed_out: bool,
     ignore_failure: bool,
 ) -> crate::Result<()> {
-    process.stdout.drain().context(format_args!(
-        "could not capture stdout from effect '{name}'"
-    ))?;
-    process.stderr.drain().context(format_args!(
-        "could not capture stderr from effect '{name}'"
-    ))?;
+    process
+        .stdout
+        .drain()
+        .context(format_args!("effect '{name}' stdout"))?;
+    process
+        .stderr
+        .drain()
+        .context(format_args!("effect '{name}' stderr"))?;
     process.stdout.stream = None;
     process.stderr.stream = None;
 
@@ -334,10 +330,10 @@ fn finish(
     }
     if !status.success() && !ignore_failure {
         if output.is_empty() {
-            return Err(error!("effect '{name}' exited with {status}"));
+            return Err(error!("effect '{name}': {status}"));
         }
         return Err(Error::context(
-            format_args!("effect '{name}' exited with {status}"),
+            format_args!("effect '{name}': {status}"),
             output,
         ));
     }

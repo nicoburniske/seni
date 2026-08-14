@@ -68,8 +68,7 @@ pub struct Selection(Box<[VariantId]>);
 
 impl Config {
     pub fn parse(reader: impl Read) -> crate::Result<Self> {
-        let raw: RawManifest =
-            serde_json::from_reader(reader).context("could not parse manifest JSON")?;
+        let raw: RawManifest = serde_json::from_reader(reader).context("manifest JSON")?;
         if raw.version != 4 {
             return Err(error!("unsupported version {}, expected 4", raw.version));
         }

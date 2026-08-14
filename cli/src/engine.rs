@@ -37,17 +37,17 @@ pub fn activate(
             Err(context) if context.kind() == std::io::ErrorKind::NotFound => continue,
             Err(context) => {
                 return Err(Error::context(
-                    format_args!("could not inspect managed file '{}'", target.display()),
+                    format_args!("managed target '{}'", target.display()),
                     context,
                 ))
             }
             Ok(metadata) => metadata,
         };
         let actual = if metadata.file_type().is_symlink() {
-            Some(fs::read_link(&target).context(format_args!(
-                "could not read managed file link '{}'",
-                target.display()
-            ))?)
+            Some(
+                fs::read_link(&target)
+                    .context(format_args!("managed target '{}'", target.display()))?,
+            )
         } else {
             None
         };
@@ -73,7 +73,7 @@ pub fn activate(
         };
         if !owned {
             return Err(error!(
-                "managed file target '{}' conflicts with an existing path",
+                "managed target '{}' already exists",
                 target.display()
             ));
         }
@@ -89,10 +89,8 @@ pub fn activate(
 
             let target = previous.home.join(file.path.as_ref());
             if path_points_to(&target, &managed_source(previous, state_dir, file))? {
-                fs::remove_file(&target).context(format_args!(
-                    "could not remove stale managed file '{}'",
-                    target.display()
-                ))?;
+                fs::remove_file(&target)
+                    .context(format_args!("stale managed target '{}'", target.display()))?;
             }
         }
     }
@@ -103,10 +101,8 @@ pub fn activate(
         if path_points_to(&target, &source)? {
             continue;
         }
-        fs::create_dir_all(target.parent().unwrap()).context(format_args!(
-            "could not create parent directory for managed file '{}'",
-            target.display()
-        ))?;
+        fs::create_dir_all(target.parent().unwrap())
+            .context(format_args!("parent directory for '{}'", target.display()))?;
         let mut temporary = OsString::from(target.as_os_str());
         temporary.push(".sumi-tmp");
         let temporary = PathBuf::from(temporary);
@@ -114,42 +110,35 @@ pub fn activate(
             Err(context) if context.kind() == std::io::ErrorKind::NotFound => {}
             Err(context) => {
                 return Err(Error::context(
-                    format_args!(
-                        "could not inspect temporary managed file link '{}'",
-                        temporary.display()
-                    ),
+                    format_args!("temporary link '{}'", temporary.display()),
                     context,
                 ))
             }
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                fs::remove_file(&temporary).context(format_args!(
-                    "could not remove temporary managed file link '{}'",
-                    temporary.display()
-                ))?;
+                fs::remove_file(&temporary)
+                    .context(format_args!("temporary link '{}'", temporary.display()))?;
             }
             Ok(_) => {
                 return Err(error!(
-                    "temporary managed file link '{}' conflicts with an existing path",
+                    "temporary path '{}' already exists",
                     temporary.display()
                 ))
             }
         }
 
-        symlink(&*source, &temporary).context(format_args!(
-            "could not create managed file link '{}'",
-            target.display()
-        ))?;
+        symlink(&*source, &temporary)
+            .context(format_args!("managed link '{}'", target.display()))?;
         if let Err(context) = fs::rename(&temporary, &target) {
             if let Err(error) = fs::remove_file(&temporary) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
-                        "sumi: warning: could not remove temporary managed file link '{}': {error}",
+                        "sumi: warning: temporary link '{}': {error}",
                         temporary.display()
                     );
                 }
             }
             return Err(Error::context(
-                format_args!("could not replace managed file link '{}'", target.display()),
+                format_args!("managed link '{}'", target.display()),
                 context,
             ));
         }
@@ -179,7 +168,7 @@ pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
             }
             Err(context) => {
                 eprintln!(
-                    "sumi: warning: could not inspect managed file '{}': {context}",
+                    "sumi: warning: managed target '{}': {context}",
                     target.display()
                 );
                 summary.failed += 1;
@@ -194,7 +183,7 @@ pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
             Ok(actual) => actual,
             Err(context) => {
                 eprintln!(
-                    "sumi: warning: could not read managed file link '{}': {context}",
+                    "sumi: warning: managed target '{}': {context}",
                     target.display()
                 );
                 summary.failed += 1;
@@ -209,7 +198,7 @@ pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
             Ok(()) => summary.removed += 1,
             Err(context) => {
                 eprintln!(
-                    "sumi: warning: could not remove managed file link '{}': {context}",
+                    "sumi: warning: managed target '{}': {context}",
                     target.display()
                 );
                 summary.failed += 1;
@@ -307,7 +296,7 @@ fn path_points_to(path: &Path, expected: &Path) -> crate::Result<bool> {
         Err(context) if context.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(context) => {
             return Err(Error::context(
-                format_args!("could not inspect managed file '{}'", path.display()),
+                format_args!("managed target '{}'", path.display()),
                 context,
             ))
         }
@@ -315,10 +304,10 @@ fn path_points_to(path: &Path, expected: &Path) -> crate::Result<bool> {
     if !metadata.file_type().is_symlink() {
         return Ok(false);
     }
-    Ok(fs::read_link(path).context(format_args!(
-        "could not read managed file link '{}'",
-        path.display()
-    ))? == expected)
+    Ok(
+        fs::read_link(path).context(format_args!("managed target '{}'", path.display()))?
+            == expected,
+    )
 }
 
 struct LockedState<'a> {
@@ -330,31 +319,23 @@ struct LockedState<'a> {
 
 impl<'a> LockedState<'a> {
     fn open(dir: &'a Path) -> crate::Result<Self> {
-        fs::create_dir_all(dir).context(format_args!(
-            "could not create state directory '{}'",
-            dir.display()
-        ))?;
+        fs::create_dir_all(dir).context(format_args!("state directory '{}'", dir.display()))?;
         let lock_path = dir.join("switch.lock");
         let lock = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
             .open(&lock_path)
-            .context(format_args!(
-                "could not open switch lock '{}'",
-                lock_path.display()
-            ))?;
-        lock.lock().context(format_args!(
-            "could not acquire switch lock '{}'",
-            lock_path.display()
-        ))?;
+            .context(format_args!("state lock '{}'", lock_path.display()))?;
+        lock.lock()
+            .context(format_args!("state lock '{}'", lock_path.display()))?;
 
         let current = dir.join("current");
         let (current_exists, inactive) = match fs::symlink_metadata(&current) {
             Err(context) if context.kind() == std::io::ErrorKind::NotFound => (false, "0"),
             Err(context) => {
                 return Err(Error::context(
-                    format_args!("could not inspect current pointer '{}'", current.display()),
+                    format_args!("current pointer '{}'", current.display()),
                     context,
                 ))
             }
@@ -362,10 +343,8 @@ impl<'a> LockedState<'a> {
                 return Err(error!("'{}' is not a symlink", current.display()))
             }
             Ok(_) => {
-                let target = fs::read_link(&current).context(format_args!(
-                    "could not read current pointer '{}'",
-                    current.display()
-                ))?;
+                let target = fs::read_link(&current)
+                    .context(format_args!("current pointer '{}'", current.display()))?;
                 let inactive = match target.as_path() {
                     path if path == Path::new("states/0") => "1",
                     path if path == Path::new("states/1") => "0",
@@ -394,12 +373,10 @@ impl<'a> LockedState<'a> {
             return Ok(None);
         }
         let path = self.dir.join("current/selection.json");
-        let file = fs::File::open(&path).context(format_args!(
-            "could not open current selection '{}'",
-            path.display()
-        ))?;
+        let file = fs::File::open(&path)
+            .context(format_args!("current selection '{}'", path.display()))?;
         Ok(Some(serde_json::from_reader(file).context(
-            format_args!("could not parse JSON at '{}'", path.display()),
+            format_args!("selection JSON '{}'", path.display()),
         )?))
     }
 
@@ -408,12 +385,10 @@ impl<'a> LockedState<'a> {
             return Ok(None);
         }
         let path = self.dir.join("current/manifest");
-        let file = fs::File::open(&path).context(format_args!(
-            "could not open current manifest '{}'",
-            path.display()
-        ))?;
+        let file =
+            fs::File::open(&path).context(format_args!("current manifest '{}'", path.display()))?;
         Ok(Some(Config::parse(file).context(format_args!(
-            "could not parse current manifest '{}'",
+            "current manifest '{}'",
             path.display()
         ))?))
     }
@@ -421,17 +396,15 @@ impl<'a> LockedState<'a> {
     fn clear(&self) -> crate::Result<()> {
         if self.current {
             let current = self.dir.join("current");
-            fs::remove_file(&current).context(format_args!(
-                "could not remove current pointer '{}'",
-                current.display()
-            ))?;
+            fs::remove_file(&current)
+                .context(format_args!("current pointer '{}'", current.display()))?;
         }
         let states = self.dir.join("states");
         match fs::remove_dir_all(&states) {
             Ok(()) => Ok(()),
             Err(context) if context.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(context) => Err(Error::context(
-                format_args!("could not remove runtime states '{}'", states.display()),
+                format_args!("runtime states '{}'", states.display()),
                 context,
             )),
         }
@@ -446,10 +419,8 @@ impl<'a> LockedState<'a> {
         for (facet_id, name, facet) in config.facets() {
             let variant_id = selection[facet_id];
             let (value, variant) = facet.variant(variant_id);
-            let metadata = fs::metadata(&variant.root).context(format_args!(
-                "could not inspect variant root '{}'",
-                variant.root.display()
-            ))?;
+            let metadata = fs::metadata(&variant.root)
+                .context(format_args!("variant root '{}'", variant.root.display()))?;
             if !metadata.is_dir() {
                 return Err(error!("root for {name}={value} is not a directory"));
             }
@@ -469,9 +440,9 @@ impl<'a> LockedState<'a> {
                 }
             };
             fs::metadata(&source).context(format_args!(
-                "could not inspect source for managed file '{}' at '{}'",
-                file.path,
-                source.display()
+                "source '{}' for '{}'",
+                source.display(),
+                file.path
             ))?;
         }
 
@@ -481,35 +452,27 @@ impl<'a> LockedState<'a> {
             Err(context) if context.kind() == std::io::ErrorKind::NotFound => {}
             Err(context) => {
                 return Err(Error::context(
-                    format_args!(
-                        "could not remove stale current pointer '{}'",
-                        pointer.display()
-                    ),
+                    format_args!("pending pointer '{}'", pointer.display()),
                     context,
                 ))
             }
         }
 
         let states_dir = self.dir.join("states");
-        fs::create_dir_all(&states_dir).context(format_args!(
-            "could not create states directory '{}'",
-            states_dir.display()
-        ))?;
+        fs::create_dir_all(&states_dir)
+            .context(format_args!("states directory '{}'", states_dir.display()))?;
         let state = states_dir.join(self.inactive);
         match fs::remove_dir_all(&state) {
             Ok(()) => {}
             Err(context) if context.kind() == std::io::ErrorKind::NotFound => {}
             Err(context) => {
                 return Err(Error::context(
-                    format_args!("could not clear inactive state '{}'", state.display()),
+                    format_args!("inactive state '{}'", state.display()),
                     context,
                 ))
             }
         }
-        fs::create_dir(&state).context(format_args!(
-            "could not create runtime state '{}'",
-            state.display()
-        ))?;
+        fs::create_dir(&state).context(format_args!("runtime state '{}'", state.display()))?;
         let pending = PendingState {
             path: state,
             pointer,
@@ -518,30 +481,25 @@ impl<'a> LockedState<'a> {
         };
 
         let root_dir = pending.path.join("root");
-        fs::create_dir(&root_dir).context(format_args!(
-            "could not create state roots '{}'",
-            root_dir.display()
-        ))?;
+        fs::create_dir(&root_dir).context(format_args!("state roots '{}'", root_dir.display()))?;
         let state_manifest = pending.path.join("manifest");
         symlink(manifest_path, &state_manifest).context(format_args!(
-            "could not link state manifest '{}'",
+            "state manifest '{}'",
             state_manifest.display()
         ))?;
         let selection_path = pending.path.join("selection.json");
         let selection_file = fs::File::create(&selection_path).context(format_args!(
-            "could not create state selection '{}'",
+            "state selection '{}'",
             selection_path.display()
         ))?;
         serde_json::to_writer_pretty(selection_file, &NamedSelection { config, selection })
-            .context("could not serialize selection")?;
+            .context("selection JSON")?;
 
         for (facet_id, name, facet) in config.facets() {
             let variant = facet.variant(selection[facet_id]).1;
             let link = root_dir.join(name);
-            symlink(&variant.root, &link).context(format_args!(
-                "could not link selected variant '{}'",
-                link.display()
-            ))?;
+            symlink(&variant.root, &link)
+                .context(format_args!("variant link '{}'", link.display()))?;
         }
 
         Ok(pending)
@@ -557,15 +515,11 @@ struct PendingState {
 
 impl PendingState {
     fn commit(&mut self, state_dir: &Path) -> crate::Result<()> {
-        symlink(&self.target, &self.pointer).context(format_args!(
-            "could not create current pointer '{}'",
-            self.pointer.display()
-        ))?;
+        symlink(&self.target, &self.pointer)
+            .context(format_args!("pending pointer '{}'", self.pointer.display()))?;
         let current = state_dir.join("current");
-        fs::rename(&self.pointer, &current).context(format_args!(
-            "could not replace current pointer '{}'",
-            current.display()
-        ))?;
+        fs::rename(&self.pointer, &current)
+            .context(format_args!("current pointer '{}'", current.display()))?;
         self.committed = true;
         Ok(())
     }
@@ -577,7 +531,7 @@ impl Drop for PendingState {
             if let Err(error) = fs::remove_file(&self.pointer) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
-                        "sumi: warning: could not remove pending pointer '{}': {error}",
+                        "sumi: warning: pending pointer '{}': {error}",
                         self.pointer.display()
                     );
                 }
@@ -585,7 +539,7 @@ impl Drop for PendingState {
             if let Err(error) = fs::remove_dir_all(&self.path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
-                        "sumi: warning: could not remove pending state '{}': {error}",
+                        "sumi: warning: pending state '{}': {error}",
                         self.path.display()
                     );
                 }
@@ -923,7 +877,7 @@ mod tests {
         let error = activate(&new_config, &new_manifest, &state)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("conflicts with an existing path"));
+        assert!(error.contains("already exists"));
         assert_eq!(fs::read_to_string(&managed).unwrap(), "mine");
         assert_eq!(fs::read_link(state.join("current")).unwrap(), current);
         assert!(!state.join(".current").exists());

@@ -55,15 +55,11 @@ fn main() -> ExitCode {
         let manifest_path = cli
             .manifest
             .or_else(|| env::var_os("SUMI_MANIFEST").map(PathBuf::from))
-            .context("manifest not configured; pass --manifest or set SUMI_MANIFEST")?;
-        let manifest_path = fs::canonicalize(&manifest_path).context(format_args!(
-            "could not resolve manifest '{}'",
-            manifest_path.display()
-        ))?;
-        let manifest_file = fs::File::open(&manifest_path).context(format_args!(
-            "could not open manifest '{}'",
-            manifest_path.display()
-        ))?;
+            .context("manifest not configured; use --manifest or SUMI_MANIFEST")?;
+        let manifest_path = fs::canonicalize(&manifest_path)
+            .context(format_args!("manifest '{}'", manifest_path.display()))?;
+        let manifest_file = fs::File::open(&manifest_path)
+            .context(format_args!("manifest '{}'", manifest_path.display()))?;
         let config = Config::parse(manifest_file)?;
 
         let state_dir = cli
@@ -74,7 +70,7 @@ fn main() -> ExitCode {
             state_dir
         } else {
             env::current_dir()
-                .context("could not resolve current directory '.'")?
+                .context("current directory")?
                 .join(state_dir)
         };
 
@@ -91,7 +87,7 @@ fn main() -> ExitCode {
                 );
                 if summary.failed != 0 {
                     return Err(error!(
-                        "could not deactivate configuration: {} managed links could not be removed",
+                        "deactivation incomplete: {} managed links remain",
                         summary.failed
                     ));
                 }
@@ -170,8 +166,8 @@ fn main() -> ExitCode {
 fn print_json(value: &impl Serialize) -> crate::Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    serde_json::to_writer_pretty(&mut stdout, value).context("could not serialize JSON")?;
-    writeln!(stdout).context("could not write JSON")?;
+    serde_json::to_writer_pretty(&mut stdout, value).context("JSON output")?;
+    writeln!(stdout).context("stdout")?;
     Ok(())
 }
 
