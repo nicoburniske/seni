@@ -1,8 +1,173 @@
 use crate::error::{error, Context, Error};
-use crate::manifest::{Config, NamedSelection, RawSelection, Selection};
+use crate::manifest::{Config, ManagedFile, NamedSelection, RawSelection, Selection, Source};
+use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+
+pub fn activate(
+    config: &Config,
+    manifest_path: &Path,
+    state_dir: &Path,
+) -> crate::Result<Selection> {
+    let state = LockedState::open(state_dir)?;
+    let mut selection = config.default_selection();
+    let previous = if let Some(raw) = state.current_selection()? {
+        for (facet_id, name, facet) in config.facets() {
+            if let Some(variant_id) = raw
+                .get(name)
+                .and_then(|value| facet.variant_id(value.as_ref()))
+            {
+                selection[facet_id] = variant_id;
+            }
+        }
+
+        let previous_manifest = state_dir.join("current/manifest");
+        let previous_file = fs::File::open(&previous_manifest).context(format_args!(
+            "could not open current manifest '{}'",
+            previous_manifest.display()
+        ))?;
+        Some(Config::parse(previous_file).context(format_args!(
+            "could not parse current manifest '{}'",
+            previous_manifest.display()
+        ))?)
+    } else {
+        None
+    };
+
+    let mut pending = state.build(config, manifest_path, &selection)?;
+
+    for file in &config.files {
+        let target = config.home.join(file.path.as_ref());
+        let source = managed_source(config, state_dir, file);
+        let metadata = match fs::symlink_metadata(&target) {
+            Err(context) if context.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(context) => {
+                return Err(Error::context(
+                    format_args!("could not inspect managed file '{}'", target.display()),
+                    context,
+                ))
+            }
+            Ok(metadata) => metadata,
+        };
+        let actual = if metadata.file_type().is_symlink() {
+            Some(fs::read_link(&target).context(format_args!(
+                "could not read managed file link '{}'",
+                target.display()
+            ))?)
+        } else {
+            None
+        };
+        if actual.as_deref() == Some(source.as_ref()) {
+            continue;
+        }
+
+        let previous_file = previous
+            .as_ref()
+            .filter(|previous| previous.home == config.home)
+            .and_then(|previous| {
+                previous
+                    .files
+                    .iter()
+                    .find(|previous| previous.path == file.path)
+                    .map(|file| (previous, file))
+            });
+        let owned = match previous_file {
+            Some((previous, file)) => {
+                actual.as_deref() == Some(managed_source(previous, state_dir, file).as_ref())
+            }
+            None => false,
+        };
+        if !owned {
+            return Err(error!(
+                "managed file target '{}' conflicts with an existing path",
+                target.display()
+            ));
+        }
+    }
+
+    if let Some(previous) = &previous {
+        for file in &previous.files {
+            if previous.home == config.home
+                && config.files.iter().any(|current| current.path == file.path)
+            {
+                continue;
+            }
+
+            let target = previous.home.join(file.path.as_ref());
+            if path_points_to(&target, &managed_source(previous, state_dir, file))? {
+                fs::remove_file(&target).context(format_args!(
+                    "could not remove stale managed file '{}'",
+                    target.display()
+                ))?;
+            }
+        }
+    }
+
+    for file in &config.files {
+        let target = config.home.join(file.path.as_ref());
+        let source = managed_source(config, state_dir, file);
+        if path_points_to(&target, &source)? {
+            continue;
+        }
+        fs::create_dir_all(target.parent().unwrap()).context(format_args!(
+            "could not create parent directory for managed file '{}'",
+            target.display()
+        ))?;
+        let mut temporary = OsString::from(target.as_os_str());
+        temporary.push(".sumi-tmp");
+        let temporary = PathBuf::from(temporary);
+        match fs::symlink_metadata(&temporary) {
+            Err(context) if context.kind() == std::io::ErrorKind::NotFound => {}
+            Err(context) => {
+                return Err(Error::context(
+                    format_args!(
+                        "could not inspect temporary managed file link '{}'",
+                        temporary.display()
+                    ),
+                    context,
+                ))
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::remove_file(&temporary).context(format_args!(
+                    "could not remove temporary managed file link '{}'",
+                    temporary.display()
+                ))?;
+            }
+            Ok(_) => {
+                return Err(error!(
+                    "temporary managed file link '{}' conflicts with an existing path",
+                    temporary.display()
+                ))
+            }
+        }
+
+        symlink(&*source, &temporary).context(format_args!(
+            "could not create managed file link '{}'",
+            target.display()
+        ))?;
+        if let Err(context) = fs::rename(&temporary, &target) {
+            if let Err(error) = fs::remove_file(&temporary) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "sumi: warning: could not remove temporary managed file link '{}': {error}",
+                        temporary.display()
+                    );
+                }
+            }
+            return Err(Error::context(
+                format_args!("could not replace managed file link '{}'", target.display()),
+                context,
+            ));
+        }
+    }
+
+    pending.commit(state_dir)?;
+    crate::effects::run(config.effects.iter(), &selection)?;
+
+    Ok(selection)
+}
 
 pub fn switch(
     config: &Config,
@@ -10,64 +175,10 @@ pub fn switch(
     state_dir: &Path,
     sets: &[String],
 ) -> crate::Result<Selection> {
-    fs::create_dir_all(state_dir).context(format_args!(
-        "could not create state directory '{}'",
-        state_dir.display()
-    ))?;
-    let lock_path = state_dir.join("switch.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .context(format_args!(
-            "could not open switch lock '{}'",
-            lock_path.display()
-        ))?;
-    lock.lock().context(format_args!(
-        "could not acquire switch lock '{}'",
-        lock_path.display()
-    ))?;
-
-    let current = state_dir.join("current");
-    let (mut selection, slot) = match fs::symlink_metadata(&current) {
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            (config.default_selection(), "0")
-        }
-        Err(context) => {
-            return Err(Error::context(
-                format_args!("could not inspect current pointer '{}'", current.display()),
-                context,
-            ))
-        }
-        Ok(metadata) if !metadata.file_type().is_symlink() => {
-            return Err(error!("'{}' is not a symlink", current.display()))
-        }
-        Ok(_) => {
-            let target = fs::read_link(&current).context(format_args!(
-                "could not read current pointer '{}'",
-                current.display()
-            ))?;
-            let slot = match target.as_path() {
-                path if path == Path::new("states/0") => "1",
-                path if path == Path::new("states/1") => "0",
-                _ => {
-                    return Err(error!(
-                        "current pointer '{}' has invalid target '{}'",
-                        current.display(),
-                        target.display()
-                    ))
-                }
-            };
-            let path = current.join("selection.json");
-            let file = fs::File::open(&path).context(format_args!(
-                "could not open current selection '{}'",
-                path.display()
-            ))?;
-            let raw: RawSelection = serde_json::from_reader(file)
-                .context(format_args!("could not parse JSON at '{}'", path.display()))?;
-            (config.parse_selection(raw)?, slot)
-        }
+    let state = LockedState::open(state_dir)?;
+    let mut selection = match state.current_selection()? {
+        Some(raw) => config.parse_selection(raw)?,
+        None => config.default_selection(),
     };
 
     let mut requested = Vec::with_capacity(sets.len());
@@ -85,102 +196,8 @@ pub fn switch(
         requested.push(facet_id);
     }
 
-    for (facet_id, name, facet) in config.facets() {
-        let variant_id = selection[facet_id];
-        let (value, variant) = facet.variant(variant_id);
-        let metadata = fs::metadata(&variant.root).context(format_args!(
-            "could not inspect variant root '{}'",
-            variant.root.display()
-        ))?;
-        if !metadata.is_dir() {
-            return Err(error!("root for {name}={value} is not a directory"));
-        }
-    }
-
-    let current_tmp = state_dir.join(".current");
-    match fs::remove_file(&current_tmp) {
-        Ok(()) => {}
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(context) => {
-            return Err(Error::context(
-                format_args!(
-                    "could not remove stale current pointer '{}'",
-                    current_tmp.display()
-                ),
-                context,
-            ))
-        }
-    }
-
-    let states_dir = state_dir.join("states");
-    fs::create_dir_all(&states_dir).context(format_args!(
-        "could not create states directory '{}'",
-        states_dir.display()
-    ))?;
-    let state = states_dir.join(slot);
-    match fs::remove_dir_all(&state) {
-        Ok(()) => {}
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(context) => {
-            return Err(Error::context(
-                format_args!("could not clear inactive state '{}'", state.display()),
-                context,
-            ))
-        }
-    }
-    fs::create_dir(&state).context(format_args!(
-        "could not create runtime state '{}'",
-        state.display()
-    ))?;
-    let mut pending = PendingState {
-        path: state,
-        pointer: current_tmp,
-        committed: false,
-    };
-
-    let root_dir = pending.path.join("root");
-    fs::create_dir(&root_dir).context(format_args!(
-        "could not create state roots '{}'",
-        root_dir.display()
-    ))?;
-    let state_manifest = pending.path.join("manifest");
-    symlink(manifest_path, &state_manifest).context(format_args!(
-        "could not link state manifest '{}'",
-        state_manifest.display()
-    ))?;
-    let selection_path = pending.path.join("selection.json");
-    let selection_file = fs::File::create(&selection_path).context(format_args!(
-        "could not create state selection '{}'",
-        selection_path.display()
-    ))?;
-    serde_json::to_writer_pretty(
-        selection_file,
-        &NamedSelection {
-            config,
-            selection: &selection,
-        },
-    )
-    .context("could not serialize selection")?;
-
-    for (facet_id, name, facet) in config.facets() {
-        let variant_id = selection[facet_id];
-        let variant = facet.variant(variant_id).1;
-        let link = root_dir.join(name);
-        symlink(&variant.root, &link).context(format_args!(
-            "could not link selected variant '{}'",
-            link.display()
-        ))?;
-    }
-
-    symlink(PathBuf::from("states").join(slot), &pending.pointer).context(format_args!(
-        "could not create current pointer '{}'",
-        pending.pointer.display()
-    ))?;
-    fs::rename(&pending.pointer, &current).context(format_args!(
-        "could not replace current pointer '{}'",
-        current.display()
-    ))?;
-    pending.committed = true;
+    let mut pending = state.build(config, manifest_path, &selection)?;
+    pending.commit(state_dir)?;
 
     crate::effects::run(
         config.effects.iter().filter(|effect| {
@@ -192,10 +209,262 @@ pub fn switch(
     Ok(selection)
 }
 
+fn managed_source<'a>(
+    config: &'a Config,
+    state_dir: &Path,
+    file: &'a ManagedFile,
+) -> Cow<'a, Path> {
+    match &file.source {
+        Source::Static(source) => Cow::Borrowed(source),
+        Source::Facet(facet_id) => Cow::Owned(
+            state_dir
+                .join("current/root")
+                .join(
+                    config
+                        .facets()
+                        .find(|(candidate, _, _)| candidate == facet_id)
+                        .unwrap()
+                        .1,
+                )
+                .join(file.path.as_ref()),
+        ),
+    }
+}
+
+fn path_points_to(path: &Path, expected: &Path) -> crate::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(context) if context.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(context) => {
+            return Err(Error::context(
+                format_args!("could not inspect managed file '{}'", path.display()),
+                context,
+            ))
+        }
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    Ok(fs::read_link(path).context(format_args!(
+        "could not read managed file link '{}'",
+        path.display()
+    ))? == expected)
+}
+
+struct LockedState<'a> {
+    dir: &'a Path,
+    current: bool,
+    inactive: &'static str,
+    _lock: fs::File,
+}
+
+impl<'a> LockedState<'a> {
+    fn open(dir: &'a Path) -> crate::Result<Self> {
+        fs::create_dir_all(dir).context(format_args!(
+            "could not create state directory '{}'",
+            dir.display()
+        ))?;
+        let lock_path = dir.join("switch.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .context(format_args!(
+                "could not open switch lock '{}'",
+                lock_path.display()
+            ))?;
+        lock.lock().context(format_args!(
+            "could not acquire switch lock '{}'",
+            lock_path.display()
+        ))?;
+
+        let current = dir.join("current");
+        let (current_exists, inactive) = match fs::symlink_metadata(&current) {
+            Err(context) if context.kind() == std::io::ErrorKind::NotFound => (false, "0"),
+            Err(context) => {
+                return Err(Error::context(
+                    format_args!("could not inspect current pointer '{}'", current.display()),
+                    context,
+                ))
+            }
+            Ok(metadata) if !metadata.file_type().is_symlink() => {
+                return Err(error!("'{}' is not a symlink", current.display()))
+            }
+            Ok(_) => {
+                let target = fs::read_link(&current).context(format_args!(
+                    "could not read current pointer '{}'",
+                    current.display()
+                ))?;
+                let inactive = match target.as_path() {
+                    path if path == Path::new("states/0") => "1",
+                    path if path == Path::new("states/1") => "0",
+                    _ => {
+                        return Err(error!(
+                            "current pointer '{}' has invalid target '{}'",
+                            current.display(),
+                            target.display()
+                        ))
+                    }
+                };
+                (true, inactive)
+            }
+        };
+
+        Ok(Self {
+            dir,
+            current: current_exists,
+            inactive,
+            _lock: lock,
+        })
+    }
+
+    fn current_selection(&self) -> crate::Result<Option<RawSelection>> {
+        if !self.current {
+            return Ok(None);
+        }
+        let path = self.dir.join("current/selection.json");
+        let file = fs::File::open(&path).context(format_args!(
+            "could not open current selection '{}'",
+            path.display()
+        ))?;
+        Ok(Some(serde_json::from_reader(file).context(
+            format_args!("could not parse JSON at '{}'", path.display()),
+        )?))
+    }
+
+    fn build(
+        &self,
+        config: &Config,
+        manifest_path: &Path,
+        selection: &Selection,
+    ) -> crate::Result<PendingState> {
+        for (facet_id, name, facet) in config.facets() {
+            let variant_id = selection[facet_id];
+            let (value, variant) = facet.variant(variant_id);
+            let metadata = fs::metadata(&variant.root).context(format_args!(
+                "could not inspect variant root '{}'",
+                variant.root.display()
+            ))?;
+            if !metadata.is_dir() {
+                return Err(error!("root for {name}={value} is not a directory"));
+            }
+        }
+        for file in &config.files {
+            let source = match &file.source {
+                Source::Static(source) => Cow::Borrowed(source.as_path()),
+                Source::Facet(facet_id) => {
+                    let facet = &config[*facet_id];
+                    Cow::Owned(
+                        facet
+                            .variant(selection[*facet_id])
+                            .1
+                            .root
+                            .join(file.path.as_ref()),
+                    )
+                }
+            };
+            fs::metadata(&source).context(format_args!(
+                "could not inspect source for managed file '{}' at '{}'",
+                file.path,
+                source.display()
+            ))?;
+        }
+
+        let pointer = self.dir.join(".current");
+        match fs::remove_file(&pointer) {
+            Ok(()) => {}
+            Err(context) if context.kind() == std::io::ErrorKind::NotFound => {}
+            Err(context) => {
+                return Err(Error::context(
+                    format_args!(
+                        "could not remove stale current pointer '{}'",
+                        pointer.display()
+                    ),
+                    context,
+                ))
+            }
+        }
+
+        let states_dir = self.dir.join("states");
+        fs::create_dir_all(&states_dir).context(format_args!(
+            "could not create states directory '{}'",
+            states_dir.display()
+        ))?;
+        let state = states_dir.join(self.inactive);
+        match fs::remove_dir_all(&state) {
+            Ok(()) => {}
+            Err(context) if context.kind() == std::io::ErrorKind::NotFound => {}
+            Err(context) => {
+                return Err(Error::context(
+                    format_args!("could not clear inactive state '{}'", state.display()),
+                    context,
+                ))
+            }
+        }
+        fs::create_dir(&state).context(format_args!(
+            "could not create runtime state '{}'",
+            state.display()
+        ))?;
+        let pending = PendingState {
+            path: state,
+            pointer,
+            target: PathBuf::from("states").join(self.inactive),
+            committed: false,
+        };
+
+        let root_dir = pending.path.join("root");
+        fs::create_dir(&root_dir).context(format_args!(
+            "could not create state roots '{}'",
+            root_dir.display()
+        ))?;
+        let state_manifest = pending.path.join("manifest");
+        symlink(manifest_path, &state_manifest).context(format_args!(
+            "could not link state manifest '{}'",
+            state_manifest.display()
+        ))?;
+        let selection_path = pending.path.join("selection.json");
+        let selection_file = fs::File::create(&selection_path).context(format_args!(
+            "could not create state selection '{}'",
+            selection_path.display()
+        ))?;
+        serde_json::to_writer_pretty(selection_file, &NamedSelection { config, selection })
+            .context("could not serialize selection")?;
+
+        for (facet_id, name, facet) in config.facets() {
+            let variant = facet.variant(selection[facet_id]).1;
+            let link = root_dir.join(name);
+            symlink(&variant.root, &link).context(format_args!(
+                "could not link selected variant '{}'",
+                link.display()
+            ))?;
+        }
+
+        Ok(pending)
+    }
+}
+
 struct PendingState {
     path: PathBuf,
     pointer: PathBuf,
+    target: PathBuf,
     committed: bool,
+}
+
+impl PendingState {
+    fn commit(&mut self, state_dir: &Path) -> crate::Result<()> {
+        symlink(&self.target, &self.pointer).context(format_args!(
+            "could not create current pointer '{}'",
+            self.pointer.display()
+        ))?;
+        let current = state_dir.join("current");
+        fs::rename(&self.pointer, &current).context(format_args!(
+            "could not replace current pointer '{}'",
+            current.display()
+        ))?;
+        self.committed = true;
+        Ok(())
+    }
 }
 
 impl Drop for PendingState {
@@ -247,11 +516,11 @@ mod tests {
         }
     }
 
-    fn fixture(temp: &Path, multiple: bool) -> (Config, PathBuf, PathBuf) {
+    fn manifest(temp: &Path, name: &str, multiple: bool, files: Value) -> (Config, PathBuf) {
         let dark = temp.join("dark");
         let light = temp.join("light");
-        fs::create_dir(&dark).unwrap();
-        fs::create_dir(&light).unwrap();
+        fs::create_dir_all(&dark).unwrap();
+        fs::create_dir_all(&light).unwrap();
 
         let mut facets = Map::new();
         facets.insert(
@@ -264,8 +533,8 @@ mod tests {
         if multiple {
             let compact = temp.join("compact");
             let roomy = temp.join("roomy");
-            fs::create_dir(&compact).unwrap();
-            fs::create_dir(&roomy).unwrap();
+            fs::create_dir_all(&compact).unwrap();
+            fs::create_dir_all(&roomy).unwrap();
             facets.insert(
                 "density".to_string(),
                 json!({
@@ -278,12 +547,18 @@ mod tests {
         let encoded = serde_json::to_vec(&json!({
             "version": 4,
             "home": temp,
-            "facets": Value::Object(facets)
+            "facets": Value::Object(facets),
+            "files": files
         }))
         .unwrap();
         let config = Config::parse(encoded.as_slice()).unwrap();
-        let manifest_path = temp.join("manifest.json");
-        fs::write(&manifest_path, "{}").unwrap();
+        let manifest_path = temp.join(name);
+        fs::write(&manifest_path, encoded).unwrap();
+        (config, manifest_path)
+    }
+
+    fn fixture(temp: &Path, multiple: bool) -> (Config, PathBuf, PathBuf) {
+        let (config, manifest_path) = manifest(temp, "manifest.json", multiple, json!({}));
         (config, manifest_path, temp.join("state"))
     }
 
@@ -312,6 +587,127 @@ mod tests {
         argv.push(program.to_string_lossy().into_owned().into_boxed_str());
         argv.extend(arguments.iter().map(|argument| Box::from(*argument)));
         argv.into_boxed_slice()
+    }
+
+    #[test]
+    fn activation_preserves_valid_values_and_defaults_invalid_values() {
+        let temp = TestDir::new("activate-selection");
+        let (config, manifest_path, state) = fixture(&temp.0, false);
+        switch(
+            &config,
+            &manifest_path,
+            &state,
+            &["theme=light".to_string()],
+        )
+        .unwrap();
+
+        let selection = activate(&config, &manifest_path, &state).unwrap();
+        assert!(selected(&config, &selection, "theme", "light"));
+
+        fs::write(
+            state.join("current/selection.json"),
+            r#"{"theme":"missing"}"#,
+        )
+        .unwrap();
+        let selection = activate(&config, &manifest_path, &state).unwrap();
+        assert!(selected(&config, &selection, "theme", "dark"));
+    }
+
+    #[test]
+    fn activation_reconciles_managed_links() {
+        let temp = TestDir::new("activate-links");
+        let old = temp.0.join("old");
+        let removed = temp.0.join("removed");
+        let new = temp.0.join("new");
+        let added = temp.0.join("added");
+        fs::write(&old, "old").unwrap();
+        fs::write(&removed, "removed").unwrap();
+        fs::write(&new, "new").unwrap();
+        fs::write(&added, "added").unwrap();
+        let (old_config, old_manifest) = manifest(
+            &temp.0,
+            "old.json",
+            false,
+            json!({
+                ".config/app/current": old,
+                ".config/app/removed": removed
+            }),
+        );
+        let (new_config, new_manifest) = manifest(
+            &temp.0,
+            "new.json",
+            false,
+            json!({
+                ".config/app/current": new,
+                ".config/app/added": added
+            }),
+        );
+        let state = temp.0.join("state");
+
+        activate(&old_config, &old_manifest, &state).unwrap();
+        activate(&new_config, &new_manifest, &state).unwrap();
+
+        assert_eq!(
+            fs::read_link(temp.0.join(".config/app/current")).unwrap(),
+            new
+        );
+        assert_eq!(
+            fs::read_link(temp.0.join(".config/app/added")).unwrap(),
+            added
+        );
+        assert!(!temp.0.join(".config/app/removed").exists());
+    }
+
+    #[test]
+    fn activation_links_facet_files_through_current_state() {
+        let temp = TestDir::new("activate-facet-file");
+        let path = ".config/app/theme";
+        fs::create_dir_all(temp.0.join("dark/.config/app")).unwrap();
+        fs::create_dir_all(temp.0.join("light/.config/app")).unwrap();
+        fs::write(temp.0.join("dark").join(path), "dark").unwrap();
+        fs::write(temp.0.join("light").join(path), "light").unwrap();
+        let (config, manifest_path) = manifest(
+            &temp.0,
+            "dynamic.json",
+            false,
+            json!({".config/app/theme": {"facet": "theme"}}),
+        );
+        let state = temp.0.join("state");
+
+        activate(&config, &manifest_path, &state).unwrap();
+
+        let target = temp.0.join(path);
+        assert_eq!(
+            fs::read_link(&target).unwrap(),
+            state.join("current/root/theme").join(path)
+        );
+        assert_eq!(fs::read_to_string(target).unwrap(), "dark");
+    }
+
+    #[test]
+    fn activation_rejects_unmanaged_conflicts_without_committing() {
+        let temp = TestDir::new("activate-conflict");
+        let source = temp.0.join("source");
+        fs::write(&source, "managed").unwrap();
+        fs::create_dir_all(temp.0.join(".config/app")).unwrap();
+        let target = temp.0.join(".config/app/file");
+        fs::write(&target, "mine").unwrap();
+        let (config, manifest_path) = manifest(
+            &temp.0,
+            "conflict.json",
+            false,
+            json!({".config/app/file": source}),
+        );
+        let state = temp.0.join("state");
+
+        let error = activate(&config, &manifest_path, &state)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("conflicts with an existing path"));
+        assert_eq!(fs::read_to_string(target).unwrap(), "mine");
+        assert!(!state.join("current").exists());
+        assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 0);
     }
 
     #[test]
@@ -489,6 +885,25 @@ mod tests {
             1
         );
         assert!(!effects.lines().any(|effect| effect == "density"));
+    }
+
+    #[test]
+    fn activation_runs_every_effect() {
+        let temp = TestDir::new("activate-effects");
+        let (mut config, manifest_path, state) = fixture(&temp.0, true);
+        let log = temp.0.join("effects.log");
+        let recorder = script(&temp.0, "record-activation", ": > \"$1\"");
+        let density = config.facet_id("density").unwrap();
+        config.effects = vec![Effect {
+            name: "density".into(),
+            on: vec![density].into_boxed_slice(),
+            exec: EffectExec::Static(command(&recorder, &[log.to_str().unwrap()])),
+        }]
+        .into_boxed_slice();
+
+        activate(&config, &manifest_path, &state).unwrap();
+
+        assert!(log.exists());
     }
 
     #[test]

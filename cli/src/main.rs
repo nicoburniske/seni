@@ -28,6 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Activate,
     Switch {
         #[arg(value_name = "FACET=VALUE")]
         set: Vec<String>,
@@ -64,6 +65,10 @@ fn main() -> ExitCode {
         };
 
         match cli.command {
+            Command::Activate => {
+                switching::activate(&config, &manifest_path, &state_dir)?;
+                println!("activated configuration");
+            }
             Command::Switch { set } => {
                 switching::switch(&config, &manifest_path, &state_dir, &set)?;
                 println!("switched selection");
