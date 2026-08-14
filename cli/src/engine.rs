@@ -23,15 +23,7 @@ pub fn activate(
             }
         }
 
-        let previous_manifest = state_dir.join("current/manifest");
-        let previous_file = fs::File::open(&previous_manifest).context(format_args!(
-            "could not open current manifest '{}'",
-            previous_manifest.display()
-        ))?;
-        Some(Config::parse(previous_file).context(format_args!(
-            "could not parse current manifest '{}'",
-            previous_manifest.display()
-        ))?)
+        state.current_config()?
     } else {
         None
     };
@@ -169,6 +161,68 @@ pub fn activate(
     Ok(selection)
 }
 
+pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
+    let state = LockedState::open(state_dir)?;
+    let Some(config) = state.current_config()? else {
+        state.clear()?;
+        return Ok(Deactivation::default());
+    };
+
+    let mut summary = Deactivation::default();
+    for file in &config.files {
+        let target = config.home.join(file.path.as_ref());
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(context) if context.kind() == std::io::ErrorKind::NotFound => {
+                summary.missing += 1;
+                continue;
+            }
+            Err(context) => {
+                eprintln!(
+                    "sumi: warning: could not inspect managed file '{}': {context}",
+                    target.display()
+                );
+                summary.failed += 1;
+                continue;
+            }
+        };
+        if !metadata.file_type().is_symlink() {
+            summary.changed += 1;
+            continue;
+        }
+        let actual = match fs::read_link(&target) {
+            Ok(actual) => actual,
+            Err(context) => {
+                eprintln!(
+                    "sumi: warning: could not read managed file link '{}': {context}",
+                    target.display()
+                );
+                summary.failed += 1;
+                continue;
+            }
+        };
+        if actual != managed_source(&config, state_dir, file) {
+            summary.changed += 1;
+            continue;
+        }
+        match fs::remove_file(&target) {
+            Ok(()) => summary.removed += 1,
+            Err(context) => {
+                eprintln!(
+                    "sumi: warning: could not remove managed file link '{}': {context}",
+                    target.display()
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+
+    if summary.failed == 0 {
+        state.clear()?;
+    }
+    Ok(summary)
+}
+
 pub fn switch(
     config: &Config,
     manifest_path: &Path,
@@ -176,10 +230,10 @@ pub fn switch(
     sets: &[String],
 ) -> crate::Result<Selection> {
     let state = LockedState::open(state_dir)?;
-    let mut selection = match state.current_selection()? {
-        Some(raw) => config.parse_selection(raw)?,
-        None => config.default_selection(),
-    };
+    let raw = state
+        .current_selection()?
+        .context("configuration is not active. run 'sumi activate'")?;
+    let mut selection = config.parse_selection(raw)?;
 
     let mut requested = Vec::with_capacity(sets.len());
     for set in sets {
@@ -215,6 +269,14 @@ pub fn current_selection(config: &Config, state_dir: &Path) -> crate::Result<Sel
         Some(raw) => config.parse_selection(raw),
         None => Ok(config.default_selection()),
     }
+}
+
+#[derive(Default)]
+pub struct Deactivation {
+    pub removed: usize,
+    pub missing: usize,
+    pub changed: usize,
+    pub failed: usize,
 }
 
 fn managed_source<'a>(
@@ -339,6 +401,40 @@ impl<'a> LockedState<'a> {
         Ok(Some(serde_json::from_reader(file).context(
             format_args!("could not parse JSON at '{}'", path.display()),
         )?))
+    }
+
+    fn current_config(&self) -> crate::Result<Option<Config>> {
+        if !self.current {
+            return Ok(None);
+        }
+        let path = self.dir.join("current/manifest");
+        let file = fs::File::open(&path).context(format_args!(
+            "could not open current manifest '{}'",
+            path.display()
+        ))?;
+        Ok(Some(Config::parse(file).context(format_args!(
+            "could not parse current manifest '{}'",
+            path.display()
+        ))?))
+    }
+
+    fn clear(&self) -> crate::Result<()> {
+        if self.current {
+            let current = self.dir.join("current");
+            fs::remove_file(&current).context(format_args!(
+                "could not remove current pointer '{}'",
+                current.display()
+            ))?;
+        }
+        let states = self.dir.join("states");
+        match fs::remove_dir_all(&states) {
+            Ok(()) => Ok(()),
+            Err(context) if context.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(context) => Err(Error::context(
+                format_args!("could not remove runtime states '{}'", states.display()),
+                context,
+            )),
+        }
     }
 
     fn build(
@@ -603,6 +699,7 @@ mod tests {
         let (config, manifest_path, state) = fixture(&temp.0, true);
         let set = ["theme=light".to_string(), "density=roomy".to_string()];
 
+        activate(&config, &manifest_path, &state).unwrap();
         let selection = switch(&config, &manifest_path, &state, &set).unwrap();
         let first = fs::read_link(state.join("current")).unwrap();
 
@@ -645,7 +742,7 @@ mod tests {
     fn failed_switch_preserves_current_and_removes_pending_state() {
         let temp = TestDir::new("failed-switch");
         let (mut config, manifest_path, state) = fixture(&temp.0, false);
-        switch(&config, &manifest_path, &state, &[]).unwrap();
+        activate(&config, &manifest_path, &state).unwrap();
         let current = fs::read_link(state.join("current")).unwrap();
         let (_, facet) = config.facets.shift_remove_index(0).unwrap();
         config.facets.insert("missing/theme".into(), facet);
@@ -783,6 +880,33 @@ mod tests {
             .lines()
             .any(|effect| effect == "activation"));
 
+        let summary = deactivate(&state).unwrap();
+        assert_eq!(
+            (
+                summary.removed,
+                summary.missing,
+                summary.changed,
+                summary.failed
+            ),
+            (3, 0, 0, 0)
+        );
+        for path in ["current", "added", "theme"] {
+            assert_eq!(
+                fs::symlink_metadata(temp.0.join(".config/app").join(path))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
+        assert!(!state.join("current").exists());
+        assert!(!state.join("states").exists());
+        assert!(switch(&new_config, &new_manifest, &state, &[]).is_err());
+
+        let selection = activate(&new_config, &new_manifest, &state).unwrap();
+        assert!(selected(&new_config, &selection, "theme", "dark"));
+        assert!(selected(&new_config, &selection, "density", "compact"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "dark");
+
         fs::write(
             state.join("current/selection.json"),
             r#"{"theme":"missing"}"#,
@@ -800,15 +924,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("conflicts with an existing path"));
-        assert_eq!(fs::read_to_string(managed).unwrap(), "mine");
+        assert_eq!(fs::read_to_string(&managed).unwrap(), "mine");
         assert_eq!(fs::read_link(state.join("current")).unwrap(), current);
         assert!(!state.join(".current").exists());
+
+        let summary = deactivate(&state).unwrap();
+        assert_eq!(
+            (
+                summary.removed,
+                summary.missing,
+                summary.changed,
+                summary.failed
+            ),
+            (2, 0, 1, 0)
+        );
+        assert_eq!(fs::read_to_string(&managed).unwrap(), "mine");
+        assert!(!state.join("current").exists());
+        assert!(!state.join("states").exists());
     }
 
     #[test]
     fn effect_failures_finish_concurrently_without_rolling_back_state() {
         let temp = TestDir::new("effect-failures");
         let (mut config, manifest_path, state) = fixture(&temp.0, false);
+        activate(&config, &manifest_path, &state).unwrap();
         let failure = script(&temp.0, "fail", "printf 'broken' >&2\nexit 7");
         let timeout = script(&temp.0, "timeout", "sleep 5");
         let barrier = script(

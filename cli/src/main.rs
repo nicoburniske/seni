@@ -6,7 +6,7 @@ pub type Result<T> = std::result::Result<T, error::Error>;
 pub mod manifest;
 
 use clap::{Parser, Subcommand};
-use error::Context;
+use error::{error, Context};
 use manifest::{Config, Facet, NamedSelection, VariantId};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -32,6 +32,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Activate,
+    Deactivate,
     Facets {
         facet: Option<String>,
 
@@ -81,6 +82,20 @@ fn main() -> ExitCode {
             Command::Activate => {
                 engine::activate(&config, &manifest_path, &state_dir)?;
                 println!("activated configuration");
+            }
+            Command::Deactivate => {
+                let summary = engine::deactivate(&state_dir)?;
+                println!(
+                    "removed={} missing={} changed={} failed={}",
+                    summary.removed, summary.missing, summary.changed, summary.failed
+                );
+                if summary.failed != 0 {
+                    return Err(error!(
+                        "could not deactivate configuration: {} managed links could not be removed",
+                        summary.failed
+                    ));
+                }
+                println!("deactivated configuration");
             }
             Command::Facets { facet, json } => {
                 let selection = engine::current_selection(&config, &state_dir)?;
