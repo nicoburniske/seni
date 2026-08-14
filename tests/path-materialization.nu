@@ -8,22 +8,17 @@ def main [manifest_path: string source_path: string] {
   let manifest = open $manifest_path
   let raw_manifest = open --raw $manifest_path
 
-  assert-true (($manifest | get facets.theme.variants.light | is-empty)) "facet payload leaked into manifest"
+  let roots = ($manifest | get facets.theme.variants)
+  assert-true (($roots.light | path exists)) "light variant root is missing"
+  assert-true (($roots.dark | path exists)) "dark variant root is missing"
 
-  let static_file = (
-    $manifest
-    | get files
-    | where path == ".config/demo/static-source.txt"
-    | first
-  )
-  let static_source = ($static_file | get source.path)
+  let static_source = ($manifest | get files.".config/demo/static-source.txt")
   assert-true ($static_source != $source_path) "static file source was not materialized"
   assert-true (($static_source | path exists)) "materialized static file source is missing"
   let static_contents = open --raw $static_source
   assert-true (($static_contents | str length) > 0) "static file source is empty"
 
-  let dynamic_roots = ($manifest | get variantRoots.theme)
-  for root in ($dynamic_roots | transpose variant path) {
+  for root in ($roots | transpose variant path) {
     let generated = ($root.path | path join ".config/demo/asset-path.txt")
     assert-true (($generated | path exists)) $"generated file is missing: ($generated)"
 
@@ -32,17 +27,11 @@ def main [manifest_path: string source_path: string] {
     assert-true (not ($contents | str contains $source_path)) "generated file still uses the original source path"
   }
 
-  let dynamic_hook = (
-    $manifest
-    | get hooks
-    | where name == "asset-path"
-    | first
-  )
-  let hook_cases = ($dynamic_hook | get command.variants)
-  for case in ($hook_cases | transpose variant value) {
-    let command = ($case | get value)
-    assert-true (($command | str contains "/nix/store/")) "hook command did not use a materialized facet asset"
-    assert-true (not ($command | str contains $source_path)) "hook command still uses the original source path"
+  let effect_cases = ($manifest | get effects.asset-path.exec.variants)
+  for case in ($effect_cases | transpose variant argv) {
+    let asset = ($case.argv | get 1)
+    assert-true (($asset | str contains "/nix/store/")) "effect command did not use a materialized facet asset"
+    assert-true (not ($asset | str contains $source_path)) "effect command still uses the original source path"
   }
 
   assert-true (not ($raw_manifest | str contains $source_path)) "manifest still contains the original source path"

@@ -1,54 +1,32 @@
-def canonicalize-file [file] {
-  if ($file.source.kind == "static") {
-    $file | upsert source ($file.source | reject path)
-  } else {
-    $file
+def assert-equal [actual expected message: string] {
+  if $actual != $expected {
+    error make {msg: $"($message): expected ($expected), got ($actual)"}
   }
 }
 
-def canonicalize-hook [hook] {
-  if ($hook.command.kind == "static") {
-    $hook
-  } else {
-    $hook | upsert command ($hook.command | upsert variants {})
-  }
-}
+def main [manifest_path: string] {
+  let manifest = open $manifest_path
 
-def canonicalize-variant-roots [roots] {
-  $roots | transpose facet variants | each {|row|
-    {
-      facet: $row.facet
-      variants: ($row.variants | transpose variant path | each {|v| {variant: $v.variant, path: "<store>"}})
+  assert-equal $manifest.version 4 "manifest version"
+  assert-equal $manifest.home "/home/tester" "manifest home"
+  assert-equal ($manifest.facets | columns) [theme] "manifest facets"
+  assert-equal $manifest.facets.theme.default "light" "facet default"
+  assert-equal ($manifest.facets.theme.variants | columns | sort) [dark light] "facet variants"
+  for root in ($manifest.facets.theme.variants | values) {
+    if not ($root | path exists) {
+      error make {msg: $"variant root is missing: ($root)"}
     }
   }
-}
 
-def canonicalize-manifest [manifest] {
-  let files = (
-    $manifest
-    | get files
-    | each {|file| canonicalize-file $file }
-  )
-  let hooks = (
-    $manifest
-    | get hooks
-    | each {|hook| canonicalize-hook $hook }
-  )
-  let variant_roots = (canonicalize-variant-roots ($manifest | get variantRoots))
+  assert-equal ($manifest.files | columns) [".config/demo/app.conf"] "managed files"
+  assert-equal $manifest.files.".config/demo/app.conf" {facet: theme} "managed file source"
 
-  $manifest | merge {files: $files hooks: $hooks variantRoots: $variant_roots}
-}
-
-def main [manifest_path: string expected_json: string] {
-  let actual = (canonicalize-manifest (open $manifest_path))
-  let expected = (canonicalize-manifest ($expected_json | from json))
-
-  if $actual != $expected {
-    print "manifest shape mismatch"
-    print "actual:"
-    print ($actual | to json --raw)
-    print "expected:"
-    print ($expected | to json --raw)
-    error make {msg: "manifest shape mismatch"}
-  }
+  assert-equal ($manifest.effects | columns | sort) [demo generated] "effects"
+  assert-equal $manifest.effects.demo.on [] "static effect filter"
+  assert-equal $manifest.effects.demo.exec ["/bin/echo" reload] "static effect command"
+  assert-equal $manifest.effects.generated.on [theme] "generated effect filter"
+  assert-equal $manifest.effects.generated.exec.facet "theme" "generated effect facet"
+  assert-equal ($manifest.effects.generated.exec.variants | columns | sort) [dark light] "generated effect variants"
+  assert-equal $manifest.effects.generated.exec.variants.dark ["/bin/echo" "tone=dark"] "dark effect command"
+  assert-equal $manifest.effects.generated.exec.variants.light ["/bin/echo" "tone=light"] "light effect command"
 }

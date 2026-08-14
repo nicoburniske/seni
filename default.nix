@@ -5,98 +5,57 @@
   ...
 }: let
   types = lib.types;
-  cfg = config.sumi or {};
+  cfg = config.sumi;
 
-  fileValueType = with types; oneOf [str path package];
-  fileOptionType = types.submodule ({...}: {
-    options = {
-      watch = lib.mkOption {
-        type = with types; nullOr str;
-        default = null;
-        description = "Facet key this file reacts to. Required when value is a function.";
-      };
+  sourceType = with types; oneOf [str path package];
+  argvType = types.listOf sourceType;
 
-      value = lib.mkOption {
-        type = with types; nullOr (oneOf [fileValueType (functionTo fileValueType)]);
-        default = null;
-        description = "Static file content/source, or a function called as ctx: returning content or a source path.";
-      };
-    };
-  });
-
-  hookOptionType = types.submodule ({...}: {
-    options = {
-      watch = lib.mkOption {
-        type = with types; nullOr str;
-        default = null;
-        description = "Facet key this hook reacts to.";
-      };
-
-      command = lib.mkOption {
-        type = with types; nullOr (oneOf [str (functionTo str)]);
-        default = null;
-        description = "Shell command, or a function called as ctx: returning a shell command.";
-      };
-    };
-  });
-
-  facetOptionType = types.submodule ({...}: {
+  facetOptionType = types.submodule {
     options = {
       default = lib.mkOption {
         type = types.str;
-        description = "Default variant key for this facet.";
+        description = "default variant";
       };
 
       variants = lib.mkOption {
-        type = types.attrsOf types.attrs;
+        type = types.attrsOf types.anything;
         default = {};
-        description = "Payloads keyed by variant name.";
+        description = "variant payloads";
       };
     };
-  });
+  };
 
-  sanitizePath = path:
-    lib.replaceStrings
-    [
-      "/"
-      "."
-      " "
-      ":"
-      "@"
-      "+"
-      "\\"
-    ]
-    [
-      "-"
-      "-"
-      "-"
-      "-"
-      "-"
-      "-"
-      "-"
-    ]
-    path;
+  fileOptionType = types.submodule {
+    options = {
+      facet = lib.mkOption {
+        type = with types; nullOr str;
+        default = null;
+        description = "facet used to generate this file";
+      };
 
-  freezePathLiteral = path: let
-    pathStr = toString path;
-    frozenName = lib.strings.sanitizeDerivationName "sumi-frozen-${baseNameOf pathStr}";
-  in
-    builtins.path {
-      name = frozenName;
-      inherit path;
+      value = lib.mkOption {
+        type = with types; nullOr (oneOf [sourceType (functionTo sourceType)]);
+        default = null;
+        description = "file contents or source";
+      };
     };
+  };
 
-  # walk nested facet payloads and freeze only path leaves before manifest serialization
-  materializeManifestValue = value:
-    if lib.isDerivation value
-    then value
-    else if builtins.isPath value
-    then freezePathLiteral value
-    else if builtins.isList value
-    then map materializeManifestValue value
-    else if builtins.isAttrs value
-    then lib.mapAttrs (_: nested: materializeManifestValue nested) value
-    else value;
+  effectOptionType = types.submodule {
+    options = {
+      on = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "facets that trigger this effect during a switch";
+      };
+
+      exec = lib.mkOption {
+        type = with types; nullOr (oneOf [argvType (functionTo argvType)]);
+        default = null;
+        description = "effect argv";
+      };
+    };
+  };
 
   stripLeadingDotSlash = path:
     if lib.hasPrefix "./" path
@@ -105,24 +64,24 @@
       (builtins.substring 2 ((builtins.stringLength path) - 2) path)
     else path;
 
-  validateRelativePathKey = path: let
+  validateRelativePath = path: let
     normalized = stripLeadingDotSlash path;
     segments = lib.splitString "/" normalized;
   in
-    lib.filter (err: err != null) [
+    lib.filter (error: error != null) [
       (
-        if path == ""
+        if normalized == ""
         then "path must not be empty"
         else null
       )
       (
         if lib.hasPrefix "/" path
-        then "path must be relative (absolute paths are not allowed)"
+        then "path must be relative"
         else null
       )
       (
-        if normalized == ""
-        then "path must not resolve to an empty path"
+        if builtins.elem "." segments
+        then "path must not contain '.'"
         else null
       )
       (
@@ -148,105 +107,117 @@
       absolute
     else null;
 
-  mkManagedPath = rootRelative: key:
-    if rootRelative == ""
-    then key
-    else "${rootRelative}/${key}";
+  joinRelative = root: path:
+    if root == ""
+    then path
+    else "${root}/${path}";
+
+  sanitizePath = path:
+    lib.replaceStrings
+    ["/" "." " " ":" "@" "+" "\\"]
+    ["-" "-" "-" "-" "-" "-" "-"]
+    path;
+
+  freezePath = path: let
+    string = toString path;
+  in
+    builtins.path {
+      name = lib.strings.sanitizeDerivationName "sumi-${baseNameOf string}";
+      inherit path;
+    };
+
+  materialize = value:
+    if lib.isDerivation value
+    then value
+    else if builtins.isPath value
+    then freezePath value
+    else if builtins.isList value
+    then map materialize value
+    else if builtins.isAttrs value
+    then lib.mapAttrs (_: materialize) value
+    else value;
 in {
   options.sumi = {
     enable = lib.mkEnableOption "Sumi facet-based runtime config switching";
 
-    facets = lib.mkOption {
+    facet = lib.mkOption {
       type = types.attrsOf facetOptionType;
       default = {};
-      description = "Facet registry keyed by facet name.";
+      description = "facets keyed by name";
     };
 
-    defaultSelection = lib.mkOption {
-      type = types.attrsOf types.str;
+    file = {
+      home = lib.mkOption {
+        type = types.attrsOf fileOptionType;
+        default = {};
+        description = "files relative to the home directory";
+      };
+
+      config = lib.mkOption {
+        type = types.attrsOf fileOptionType;
+        default = {};
+        description = "files relative to the XDG config directory";
+      };
+
+      cache = lib.mkOption {
+        type = types.attrsOf fileOptionType;
+        default = {};
+        description = "files relative to the XDG cache directory";
+      };
+
+      data = lib.mkOption {
+        type = types.attrsOf fileOptionType;
+        default = {};
+        description = "files relative to the XDG data directory";
+      };
+
+      state = lib.mkOption {
+        type = types.attrsOf fileOptionType;
+        default = {};
+        description = "files relative to the XDG state directory";
+      };
+    };
+
+    effect = lib.mkOption {
+      type = types.attrsOf effectOptionType;
       default = {};
-      description = "Default selected variant per facet. Overrides facet defaults.";
+      description = "effects keyed by name";
     };
 
     homeDirectory = lib.mkOption {
       type = with types; nullOr str;
       default = null;
-      description = "Home directory Sumi should manage.";
+      description = "home directory managed by Sumi";
     };
 
     configHome = lib.mkOption {
       type = with types; nullOr str;
       default = null;
-      description = "XDG config home. Defaults to <homeDirectory>/.config.";
+      description = "XDG config directory";
     };
 
     cacheHome = lib.mkOption {
       type = with types; nullOr str;
       default = null;
-      description = "XDG cache home. Defaults to <homeDirectory>/.cache.";
+      description = "XDG cache directory";
     };
 
     dataHome = lib.mkOption {
       type = with types; nullOr str;
       default = null;
-      description = "XDG data home. Defaults to <homeDirectory>/.local/share.";
+      description = "XDG data directory";
     };
 
     stateHome = lib.mkOption {
       type = with types; nullOr str;
       default = null;
-      description = "XDG state home. Defaults to <homeDirectory>/.local/state.";
-    };
-
-    flakeRoot = lib.mkOption {
-      type = with types; nullOr str;
-      default = null;
-      description = "Flake checkout root used by app modules for source-relative assets.";
+      description = "XDG state directory";
     };
 
     stateDirectory = lib.mkOption {
       type = with types; nullOr str;
       default = null;
-      description = ''
-        Runtime state directory for Sumi internals. If null, Sumi defaults to
-        `<stateHome>/sumi`.
-      '';
-    };
-
-    homeFile = lib.mkOption {
-      type = types.attrsOf fileOptionType;
-      default = {};
-      description = "Managed files keyed by path relative to home directory.";
-    };
-
-    configFile = lib.mkOption {
-      type = types.attrsOf fileOptionType;
-      default = {};
-      description = "Managed files keyed by path relative to XDG config home.";
-    };
-
-    cacheFile = lib.mkOption {
-      type = types.attrsOf fileOptionType;
-      default = {};
-      description = "Managed files keyed by path relative to XDG cache home.";
-    };
-
-    dataFile = lib.mkOption {
-      type = types.attrsOf fileOptionType;
-      default = {};
-      description = "Managed files keyed by path relative to XDG data home.";
-    };
-
-    stateFile = lib.mkOption {
-      type = types.attrsOf fileOptionType;
-      default = {};
-      description = "Managed files keyed by path relative to XDG state home.";
-    };
-
-    hook = lib.mkOption {
-      type = types.attrsOf hookOptionType;
-      default = {};
-      description = "Runtime reload hooks keyed by hook name.";
+      description = "Sumi runtime state directory";
     };
 
     generated.manifest = lib.mkOption {
@@ -259,590 +230,276 @@ in {
       type = types.package;
       readOnly = true;
       internal = true;
-      description = "Host-wrapped Sumi CLI package.";
     };
   };
 
-  config = lib.mkMerge [
-    {
-      lib.sumi = {
-        mkOutOfStoreSymlink = path: let
-          pathStr = toString path;
-          drvName = lib.strings.sanitizeDerivationName "sumi-oos-${baseNameOf pathStr}";
-        in
-          pkgs.runCommandLocal drvName {} ''
-            ln -s ${lib.escapeShellArg pathStr} "$out"
-          '';
-        flakePath = path: let
-          pathStr = stripLeadingDotSlash path;
-          errors = validateRelativePathKey pathStr;
-        in
-          if errors != []
-          then throw "sumi flake path errors: ${lib.concatStringsSep "; " errors}"
-          else "${config.lib.sumi.paths.flakeRootOrErr}/${pathStr}";
-        renderBase16Mustache = {
-          theme,
-          template,
-        }: let
-          bases = [
-            "base00"
-            "base01"
-            "base02"
-            "base03"
-            "base04"
-            "base05"
-            "base06"
-            "base07"
-            "base08"
-            "base09"
-            "base0A"
-            "base0B"
-            "base0C"
-            "base0D"
-            "base0E"
-            "base0F"
-          ];
-          templateText =
-            if builtins.isPath template
-            then builtins.readFile template
-            else template;
-          c = theme.colors;
-          hexAt = idx: builtins.substring idx 2 c.base01;
-          placeholders =
-            (map (base: "{{${base}-hex}}") bases)
-            ++ [
-              "{{base01-dec-r}}"
-              "{{base01-dec-g}}"
-              "{{base01-dec-b}}"
-            ];
-          replacements =
-            (map (base: c.${base}) bases)
-            ++ [
-              (toString (lib.fromHexString (hexAt 0)))
-              (toString (lib.fromHexString (hexAt 2)))
-              (toString (lib.fromHexString (hexAt 4)))
-            ];
-        in
-          builtins.replaceStrings placeholders replacements templateText;
+  config = lib.mkIf cfg.enable (let
+    home = cfg.homeDirectory;
+    homes = {
+      home = {
+        absolute = home;
+        files = cfg.file.home;
       };
-    }
-
-    (lib.mkIf (cfg.enable or false) (let
-      resolvedHomeDirectory = cfg.homeDirectory;
-
-      xdgSpec = {
-        home = {
-          optName = "homeDirectory";
-          optValue = resolvedHomeDirectory;
-          suffix = "";
-          fileOptionName = "homeFile";
-          files = cfg.homeFile;
-        };
-
-        config = {
-          optName = "configHome";
-          optValue = cfg.configHome;
-          suffix = ".config";
-          fileOptionName = "configFile";
-          files = cfg.configFile;
-        };
-
-        cache = {
-          optName = "cacheHome";
-          optValue = cfg.cacheHome;
-          suffix = ".cache";
-          fileOptionName = "cacheFile";
-          files = cfg.cacheFile;
-        };
-
-        data = {
-          optName = "dataHome";
-          optValue = cfg.dataHome;
-          suffix = ".local/share";
-          fileOptionName = "dataFile";
-          files = cfg.dataFile;
-        };
-
-        state = {
-          optName = "stateHome";
-          optValue = cfg.stateHome;
-          suffix = ".local/state";
-          fileOptionName = "stateFile";
-          files = cfg.stateFile;
-        };
+      config = {
+        absolute =
+          if cfg.configHome != null
+          then cfg.configHome
+          else if home != null
+          then "${home}/.config"
+          else null;
+        files = cfg.file.config;
       };
-
-      resolvedHomes = lib.genAttrs (builtins.attrNames xdgSpec) (kind: let
-        spec = xdgSpec.${kind};
-        abs =
-          if spec.optValue != null
-          then spec.optValue
-          else if resolvedHomeDirectory != null
-          then "${resolvedHomeDirectory}/${spec.suffix}"
+      cache = {
+        absolute =
+          if cfg.cacheHome != null
+          then cfg.cacheHome
+          else if home != null
+          then "${home}/.cache"
           else null;
-      in {
-        inherit abs;
-        rel =
-          if resolvedHomeDirectory != null && abs != null
-          then toHomeRelative resolvedHomeDirectory abs
+        files = cfg.file.cache;
+      };
+      data = {
+        absolute =
+          if cfg.dataHome != null
+          then cfg.dataHome
+          else if home != null
+          then "${home}/.local/share"
           else null;
-        inherit
-          (spec)
-          fileOptionName
-          files
-          optName
-          ;
-      });
+        files = cfg.file.data;
+      };
+      state = {
+        absolute =
+          if cfg.stateHome != null
+          then cfg.stateHome
+          else if home != null
+          then "${home}/.local/state"
+          else null;
+        files = cfg.file.state;
+      };
+    };
+    stateDirectory =
+      if cfg.stateDirectory != null
+      then cfg.stateDirectory
+      else if homes.state.absolute != null
+      then "${homes.state.absolute}/sumi"
+      else null;
 
-      resolvedConfigHome = resolvedHomes.config.abs;
-      resolvedCacheHome = resolvedHomes.cache.abs;
-      resolvedDataHome = resolvedHomes.data.abs;
-      resolvedStateHome = resolvedHomes.state.abs;
+    facetNames = builtins.attrNames cfg.facet;
+    resolvedFacets = materialize cfg.facet;
 
-      resolvedSumiStateDirectory =
-        if cfg.stateDirectory != null
-        then cfg.stateDirectory
-        else if resolvedStateHome != null
-        then "${resolvedStateHome}/sumi"
+    homeErrors =
+      if home == null
+      then []
+      else
+        lib.filter (error: error != null)
+        (lib.mapAttrsToList (name: data:
+          if data.absolute != null && toHomeRelative home data.absolute == null
+          then "sumi.${name}Home must be within sumi.homeDirectory"
+          else null)
+        homes);
+
+    facetErrors = lib.flatten (lib.mapAttrsToList (name: facet: let
+      variants = builtins.attrNames facet.variants;
+    in
+      (lib.optional (variants == []) "${name}: variants must not be empty")
+      ++ (lib.optional (!(builtins.elem facet.default variants)) "${name}: default '${facet.default}' is not a variant"))
+    cfg.facet);
+
+    normalizedFiles = lib.flatten (lib.mapAttrsToList (_: data: let
+      root =
+        if home != null && data.absolute != null
+        then toHomeRelative home data.absolute
         else null;
-
-      homeContainmentErrors =
-        if resolvedHomeDirectory == null
-        then []
-        else
-          lib.filter (v: v != null)
-          (
-            (map (kind: let
-              home = resolvedHomes.${kind};
-            in
-              if home.rel != null
-              then null
-              else "sumi.${home.optName} must be within sumi.homeDirectory")
-            (builtins.attrNames xdgSpec))
-            ++ [
-              (
-                if
-                  resolvedSumiStateDirectory
-                  != null
-                  && toHomeRelative resolvedHomeDirectory resolvedSumiStateDirectory == null
-                then "sumi.stateDirectory must be within sumi.homeDirectory"
-                else null
-              )
-            ]
-          );
-
-      facetNames = builtins.attrNames cfg.facets;
-      facetVariantNames = lib.mapAttrs (_: facet: builtins.attrNames facet.variants) cfg.facets;
-      inferredDefaultSelection = lib.mapAttrs (_: facet: facet.default) cfg.facets;
-      resolvedDefaultSelection = inferredDefaultSelection // cfg.defaultSelection;
-      resolvedFacets = materializeManifestValue cfg.facets;
-      manifestFacets =
-        lib.mapAttrs (_: facet: {
-          inherit (facet) default;
-          variants = lib.genAttrs (builtins.attrNames facet.variants) (_: {});
+    in
+      if root == null
+      then []
+      else
+        lib.mapAttrsToList (path: file: {
+          path = joinRelative root (stripLeadingDotSlash path);
+          inherit (file) facet value;
         })
-        cfg.facets;
+        data.files)
+    homes);
 
-      defaultSelectionUnknownFacets =
-        lib.filter (facet: !(builtins.elem facet facetNames)) (builtins.attrNames cfg.defaultSelection);
-
-      defaultSelectionInvalidValues =
-        lib.filter (v: v != null)
-        (lib.mapAttrsToList (facet: value:
-          if !(builtins.hasAttr facet cfg.facets)
-          then null
-          else if builtins.elem value facetVariantNames.${facet}
-          then null
-          else "${facet}:${value}")
-        cfg.defaultSelection);
-
-      facetDefinitionErrors =
-        lib.flatten
-        (lib.mapAttrsToList (facet: data: let
-          variants = facetVariantNames.${facet};
-        in
-          (
-            if variants == []
-            then ["${facet}: variants must not be empty"]
-            else []
-          )
-          ++ (
-            if builtins.elem data.default variants
-            then []
-            else ["${facet}: default '${data.default}' missing from variants"]
-          ))
-        cfg.facets);
-
-      managedPathErrors =
-        lib.flatten
-        (lib.mapAttrsToList (_: spec:
-          lib.filter (v: v != null)
-          (lib.mapAttrsToList (filePath: _: let
-            errors = validateRelativePathKey filePath;
-          in
-            if errors == []
-            then null
-            else "${spec.fileOptionName}.${filePath}: ${lib.concatStringsSep "; " errors}")
-          spec.files))
-        xdgSpec);
-
-      mkNormalizedFiles = rootRelative: files:
-        lib.mapAttrsToList (filePath: fileCfg: {
-          path = mkManagedPath rootRelative (stripLeadingDotSlash filePath);
-          inherit
-            (fileCfg)
-            value
-            watch
-            ;
-        })
-        files;
-
-      normalizedFiles =
-        if homeContainmentErrors != []
-        then []
-        else
-          lib.flatten
-          (map (kind: let
-            home = resolvedHomes.${kind};
-          in
-            mkNormalizedFiles home.rel home.files)
-          (builtins.attrNames xdgSpec));
-
-      normalizedHooks =
-        lib.mapAttrsToList (hookName: hookCfg: {
-          name = hookName;
-          watch = hookCfg.watch;
-          command = hookCfg.command;
-        })
-        cfg.hook;
-
-      filePaths = map (file: file.path) normalizedFiles;
-      duplicatePaths =
-        lib.filter
-        (path: (lib.length (lib.filter (candidate: candidate == path) filePaths)) > 1)
-        (lib.unique filePaths);
-
-      filesMissingValue =
-        lib.filter (v: v != null)
-        (map (file:
-          if file.value == null
-          then file.path
-          else null)
-        normalizedFiles);
-
-      functionValueMissingWatch =
-        lib.filter (v: v != null)
-        (map (file:
-          if file.value != null && lib.isFunction file.value && file.watch == null
-          then file.path
-          else null)
-        normalizedFiles);
-
-      staticValueWithWatch =
-        lib.filter (v: v != null)
-        (map (file:
-          if file.value != null && !(lib.isFunction file.value) && file.watch != null
-          then file.path
-          else null)
-        normalizedFiles);
-
-      hookMissingCommand =
-        lib.filter (v: v != null)
-        (map (hook:
-          if hook.command == null
-          then hook.name
-          else null)
-        normalizedHooks);
-
-      hookMissingWatch =
-        lib.filter (v: v != null)
-        (map (hook:
-          if hook.watch == null
-          then hook.name
-          else null)
-        normalizedHooks);
-
-      fileWatchFacetErrors =
-        lib.filter (v: v != null)
-        (map (file: let
-          unknownWatch = file.watch != null && !(builtins.elem file.watch facetNames);
-        in
-          if !unknownWatch
-          then null
-          else "${file.path}: unknown watched facet (${file.watch})")
-        normalizedFiles);
-
-      hookWatchFacetErrors =
-        lib.filter (v: v != null)
-        (map (hook: let
-          unknownWatch = hook.watch != null && !(builtins.elem hook.watch facetNames);
-        in
-          if !unknownWatch
-          then null
-          else "${hook.name}: unknown watched facet (${hook.watch})")
-        normalizedHooks);
-
-      valueLiteralErrors =
-        lib.filter (v: v != null)
-        (map (file:
-          if file.value != null && !(lib.isFunction file.value) && builtins.isPath file.value && !(builtins.pathExists file.value)
-          then "${file.path} -> ${toString file.value}"
-          else null)
-        normalizedFiles);
-
-      mkWatchedContext = facet: variant: {
-        inherit variant;
-        value = resolvedFacets.${facet}.variants.${variant};
-      };
-
-      materializeFileValue = file: ruleHash: rawValue: let
-        normalizedValue = materializeManifestValue rawValue;
+    fileErrors = lib.flatten (lib.mapAttrsToList (kind: data:
+      lib.flatten (lib.mapAttrsToList (path: file: let
+        prefix = "sumi.file.${kind}.${path}";
+        pathErrors = map (error: "${prefix}: ${error}") (validateRelativePath path);
+        dynamic = lib.isFunction file.value;
       in
-        if builtins.isString rawValue
-        then
-          pkgs.writeTextFile {
-            name = "sumi-${sanitizePath file.path}-${ruleHash}";
-            text = toString normalizedValue;
-          }
-        else normalizedValue;
+        pathErrors
+        ++ (lib.optional (file.value == null) "${prefix}: value is required")
+        ++ (lib.optional (dynamic && file.facet == null) "${prefix}: function values require facet")
+        ++ (lib.optional (!dynamic && file.facet != null) "${prefix}: facet requires a function value")
+        ++ (lib.optional (file.facet != null && !(builtins.elem file.facet facetNames)) "${prefix}: unknown facet '${toString file.facet}'"))
+      data.files))
+    homes);
 
-      dynamicFilesForFacet = facet:
-        lib.filter (file: lib.isFunction file.value && file.watch == facet) normalizedFiles;
+    filePaths = map (file: file.path) normalizedFiles;
+    duplicateFiles =
+      lib.filter
+      (path: lib.length (lib.filter (candidate: candidate == path) filePaths) > 1)
+      (lib.unique filePaths);
 
-      writeVariantFile = facet: variant: file: let
-        rawValue = file.value (mkWatchedContext facet variant);
-        normalizedValue = materializeManifestValue rawValue;
-        escapedPath = lib.escapeShellArg file.path;
-      in
-        ''
-          target="$out"/${escapedPath}
-          mkdir -p "$(dirname "$target")"
-        ''
-        + (
-          if builtins.isString rawValue
-          then ''
-            printf '%s' ${lib.escapeShellArg (toString normalizedValue)} > "$target"
-          ''
-          else ''
-            ln -s ${lib.escapeShellArg (toString normalizedValue)} "$target"
-          ''
-        );
+    effectErrors = lib.flatten (lib.mapAttrsToList (name: effect:
+      (lib.optional (effect.exec == null) "${name}: exec is required")
+      ++ (map (facet: "${name}: unknown facet '${facet}'")
+        (lib.filter (facet: !(builtins.elem facet facetNames)) effect.on))
+      ++ (lib.optional (lib.isFunction effect.exec && lib.length effect.on != 1) "${name}: function exec requires exactly one on facet"))
+    cfg.effect);
 
-      mkVariantRoot = facet: variant: files:
+    context = facet: variant: {
+      inherit variant;
+      value = resolvedFacets.${facet}.variants.${variant};
+    };
+
+    dynamicFiles = facet:
+      lib.filter
+      (file: lib.isFunction file.value && file.facet == facet)
+      normalizedFiles;
+
+    writeVariantFile = facet: variant: file: let
+      value = materialize (file.value (context facet variant));
+      target = lib.escapeShellArg file.path;
+    in
+      ''
+        target="$out"/${target}
+        mkdir -p "$(dirname "$target")"
+      ''
+      + (
+        if builtins.isString value
+        then ''printf '%s' ${lib.escapeShellArg value} > "$target"''
+        else ''ln -s ${lib.escapeShellArg (toString value)} "$target"''
+      );
+
+    variantRoots = lib.mapAttrs (facet: data:
+      lib.mapAttrs (variant: _:
         pkgs.runCommandLocal "sumi-${sanitizePath facet}-${sanitizePath variant}" {} ''
           set -eu
           mkdir -p "$out"
-          ${lib.concatMapStringsSep "\n" (writeVariantFile facet variant) files}
-        '';
+          ${lib.concatMapStringsSep "\n" (writeVariantFile facet variant) (dynamicFiles facet)}
+        '')
+      data.variants)
+    cfg.facet;
 
-      dynamicFacetNames =
-        lib.filter
-        (facet: dynamicFilesForFacet facet != [])
-        facetNames;
-
-      variantRoots = lib.genAttrs dynamicFacetNames (facet:
-        lib.genAttrs facetVariantNames.${facet} (variant:
-          toString (mkVariantRoot facet variant (dynamicFilesForFacet facet))));
-
-      mkStaticFileDispatch = file: {
-        source = {
-          kind = "static";
-          path = toString (materializeFileValue file "static" file.value);
-        };
-      };
-
-      mkDynamicFileDispatch = file: {
-        source = {
-          kind = "facet";
-          facet = file.watch;
-        };
-      };
-
-      compiledFiles = map (file:
-        {
-          inherit (file) path;
-        }
-        // (
+    manifestFiles = builtins.listToAttrs (map (file: {
+        name = file.path;
+        value =
           if lib.isFunction file.value
-          then mkDynamicFileDispatch file
-          else mkStaticFileDispatch file
-        ))
-      normalizedFiles;
+          then {facet = file.facet;}
+          else if builtins.isString file.value
+          then
+            toString (pkgs.writeTextFile {
+              name = "sumi-${sanitizePath file.path}";
+              text = file.value;
+            })
+          else toString (materialize file.value);
+      })
+      normalizedFiles);
 
-      mkStaticHookDispatch = hook: {
-        kind = "static";
-        value = hook.command;
-      };
+    manifestEffects =
+      lib.mapAttrs (_: effect: {
+        inherit (effect) on;
+        exec =
+          if lib.isFunction effect.exec
+          then let
+            facet = builtins.head effect.on;
+          in {
+            inherit facet;
+            variants =
+              lib.mapAttrs
+              (variant: _: map toString (effect.exec (context facet variant)))
+              resolvedFacets.${facet}.variants;
+          }
+          else map toString effect.exec;
+      })
+      cfg.effect;
 
-      mkDynamicHookDispatch = hook: {
-        kind = "facet";
-        facet = hook.watch;
-        variants =
-          lib.genAttrs facetVariantNames.${hook.watch} (variant:
-            hook.command (mkWatchedContext hook.watch variant));
-      };
-
-      compiledHooks =
-        map (hook: {
-          inherit
-            (hook)
-            name
-            watch
-            ;
-          command =
-            if lib.isFunction hook.command
-            then mkDynamicHookDispatch hook
-            else mkStaticHookDispatch hook;
+    manifest = {
+      version = 4;
+      inherit home;
+      facets =
+        lib.mapAttrs (name: facet: {
+          inherit (facet) default;
+          variants = lib.mapAttrs (_: toString) variantRoots.${name};
         })
-        normalizedHooks;
+        cfg.facet;
+      files = manifestFiles;
+      effects = manifestEffects;
+    };
+    manifestPath = pkgs.writeText "sumi-manifest.json" (builtins.toJSON manifest);
+    baseCli = pkgs.callPackage ./cli/default.nix {};
 
-      manifest = {
-        version = 3;
-        home = resolvedHomeDirectory;
-        facets = manifestFacets;
-        defaultSelection = resolvedDefaultSelection;
-        inherit variantRoots;
-        files = compiledFiles;
-        hooks = compiledHooks;
+    environment = lib.filterAttrs (_: value: value != null) {
+      XDG_CONFIG_HOME = homes.config.absolute;
+      XDG_CACHE_HOME = homes.cache.absolute;
+      XDG_DATA_HOME = homes.data.absolute;
+      XDG_STATE_HOME = homes.state.absolute;
+    };
+    wrapperEnvironment =
+      environment
+      // {
+        SUMI_MANIFEST = manifestPath;
+        SUMI_STATE_DIR = stateDirectory;
       };
+    wrappedCli = pkgs.symlinkJoin {
+      name = "sumi";
+      paths = [baseCli];
+      nativeBuildInputs = [pkgs.makeWrapper];
+      postBuild = ''
+        wrapProgram "$out/bin/sumi" ${lib.escapeShellArgs (lib.concatMap (name: ["--set" name (toString wrapperEnvironment.${name})]) (builtins.attrNames wrapperEnvironment))}
+      '';
+    };
+  in {
+    assertions = [
+      {
+        assertion = home != null;
+        message = "sumi.homeDirectory must be set";
+      }
+      {
+        assertion = cfg.facet != {};
+        message = "sumi.facet must define at least one facet";
+      }
+      {
+        assertion = homeErrors == [];
+        message = "invalid Sumi directories: ${lib.concatStringsSep "; " homeErrors}";
+      }
+      {
+        assertion = facetErrors == [];
+        message = "invalid Sumi facets: ${lib.concatStringsSep "; " facetErrors}";
+      }
+      {
+        assertion = fileErrors == [];
+        message = "invalid Sumi files: ${lib.concatStringsSep "; " fileErrors}";
+      }
+      {
+        assertion = duplicateFiles == [];
+        message = "duplicate Sumi files: ${lib.concatStringsSep ", " duplicateFiles}";
+      }
+      {
+        assertion = effectErrors == [];
+        message = "invalid Sumi effects: ${lib.concatStringsSep "; " effectErrors}";
+      }
+    ];
 
-      manifestPath = pkgs.writeText "sumi-manifest.json" (builtins.toJSON manifest);
-      baseCli = pkgs.callPackage ./cli/default.nix {};
+    lib.sumi.paths = {
+      inherit home;
+      config = homes.config.absolute;
+      cache = homes.cache.absolute;
+      data = homes.data.absolute;
+      state = homes.state.absolute;
+      sumiState = stateDirectory;
+    };
 
-      xdgEnv =
-        lib.filterAttrs (_: value: value != null)
-        {
-          XDG_CONFIG_HOME = resolvedConfigHome;
-          XDG_CACHE_HOME = resolvedCacheHome;
-          XDG_DATA_HOME = resolvedDataHome;
-          XDG_STATE_HOME = resolvedStateHome;
-        };
+    environment = {
+      variables = lib.mapAttrs (_: lib.mkDefault) environment;
+      etc."sumi/manifest.json".source = manifestPath;
+      systemPackages = [wrappedCli];
+    };
 
-      wrapperEnv =
-        lib.filterAttrs (_: value: value != null)
-        {
-          SUMI_MANIFEST = manifestPath;
-          SUMI_STATE_DIR = resolvedSumiStateDirectory;
-          SUMI_HOME_DIR = resolvedHomeDirectory;
-        }
-        // xdgEnv;
-
-      wrapperArgs =
-        (lib.concatMap
-          (name: [
-            "--set"
-            name
-            (toString wrapperEnv.${name})
-          ])
-          (builtins.attrNames wrapperEnv))
-        ++ [
-          "--run"
-          ''export PATH="${pkgs.bash}/bin:$PATH"''
-        ];
-
-      wrappedCli = pkgs.symlinkJoin {
-        name = "sumi";
-        paths = [baseCli];
-        nativeBuildInputs = [pkgs.makeWrapper];
-        postBuild = ''
-          wrapProgram "$out/bin/sumi" ${lib.escapeShellArgs wrapperArgs}
-        '';
-      };
-    in {
-      assertions = [
-        {
-          assertion = cfg.facets != {};
-          message = "sumi.facets must define at least one facet.";
-        }
-        {
-          assertion = facetDefinitionErrors == [];
-          message = "sumi facet definitions are invalid: ${lib.concatStringsSep "; " facetDefinitionErrors}";
-        }
-        {
-          assertion = defaultSelectionUnknownFacets == [];
-          message = "sumi.defaultSelection contains unknown facets: ${lib.concatStringsSep ", " defaultSelectionUnknownFacets}";
-        }
-        {
-          assertion = defaultSelectionInvalidValues == [];
-          message = "sumi.defaultSelection contains invalid values: ${lib.concatStringsSep ", " defaultSelectionInvalidValues}";
-        }
-        {
-          assertion = resolvedHomeDirectory != null;
-          message = "sumi.homeDirectory must be set when sumi.enable = true.";
-        }
-        {
-          assertion = homeContainmentErrors == [];
-          message = "sumi XDG directories are invalid: ${lib.concatStringsSep "; " homeContainmentErrors}";
-        }
-        {
-          assertion = managedPathErrors == [];
-          message = "sumi managed path errors: ${lib.concatStringsSep "; " managedPathErrors}";
-        }
-        {
-          assertion = duplicatePaths == [];
-          message = "sumi managed files contain duplicate destination paths: ${lib.concatStringsSep ", " duplicatePaths}";
-        }
-        {
-          assertion = filesMissingValue == [];
-          message = "sumi files must set value: ${lib.concatStringsSep ", " filesMissingValue}";
-        }
-        {
-          assertion = functionValueMissingWatch == [];
-          message = "sumi function-valued files must set watch: ${lib.concatStringsSep ", " functionValueMissingWatch}";
-        }
-        {
-          assertion = staticValueWithWatch == [];
-          message = "sumi static file values must not set watch: ${lib.concatStringsSep ", " staticValueWithWatch}";
-        }
-        {
-          assertion = fileWatchFacetErrors == [];
-          message = "sumi file watch facet errors: ${lib.concatStringsSep "; " fileWatchFacetErrors}";
-        }
-        {
-          assertion = hookMissingCommand == [];
-          message = "sumi hooks must set command: ${lib.concatStringsSep ", " hookMissingCommand}";
-        }
-        {
-          assertion = hookMissingWatch == [];
-          message = "sumi hooks must set watch: ${lib.concatStringsSep ", " hookMissingWatch}";
-        }
-        {
-          assertion = hookWatchFacetErrors == [];
-          message = "sumi hook watch facet errors: ${lib.concatStringsSep "; " hookWatchFacetErrors}";
-        }
-        {
-          assertion = valueLiteralErrors == [];
-          message = "sumi files reference missing path literals: ${lib.concatStringsSep ", " valueLiteralErrors}";
-        }
-      ];
-
-      lib.sumi = {
-        facets = cfg.facets;
-        paths = {
-          home = resolvedHomeDirectory;
-          config = resolvedConfigHome;
-          cache = resolvedCacheHome;
-          data = resolvedDataHome;
-          state = resolvedStateHome;
-          sumiState = resolvedSumiStateDirectory;
-          flakeRoot = cfg.flakeRoot;
-          flakeRootOrErr =
-            if cfg.flakeRoot != null
-            then cfg.flakeRoot
-            else throw "sumi.flakeRoot must be set for modules that need repository-relative paths.";
-        };
-      };
-
-      environment = {
-        variables = lib.mapAttrs (_: value: lib.mkDefault value) xdgEnv;
-        etc."sumi/manifest.json".source = manifestPath;
-        systemPackages = [wrappedCli];
-      };
-
-      sumi = {
-        generated.manifest = manifestPath;
-        package = wrappedCli;
-      };
-    }))
-  ];
+    sumi = {
+      generated.manifest = manifestPath;
+      package = wrappedCli;
+    };
+  });
 }

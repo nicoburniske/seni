@@ -33,9 +33,8 @@
         config.sumi = {
           enable = true;
           homeDirectory = "/home/tester";
-          flakeRoot = "/tmp/sumi-tests";
 
-          facets.theme = {
+          facet.theme = {
             default = "light";
             variants = {
               light = {
@@ -50,17 +49,17 @@
             };
           };
 
-          configFile = {
+          file.config = {
             "demo/static-source.txt".value = fixture;
             "demo/asset-path.txt" = {
-              watch = "theme";
-              value = ctx: "asset=${toString ctx.value.asset}";
+              facet = "theme";
+              value = context: "asset=${toString context.value.asset}";
             };
           };
 
-          hook."asset-path" = {
-            watch = "theme";
-            command = ctx: "echo ${toString ctx.value.asset}";
+          effect."asset-path" = {
+            on = ["theme"];
+            exec = context: ["/bin/echo" (toString context.value.asset)];
           };
         };
       })

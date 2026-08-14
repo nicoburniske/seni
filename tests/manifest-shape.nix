@@ -32,32 +32,25 @@
         config.sumi = {
           enable = true;
           homeDirectory = "/home/tester";
-          flakeRoot = "/tmp/sumi-tests";
 
-          facets.theme = {
+          facet.theme = {
             default = "light";
             variants = {
               light.tone = "light";
-
               dark.tone = "dark";
             };
           };
 
-          defaultSelection.theme = "light";
-
-          configFile."demo/app.conf" = {
-            watch = "theme";
-            value = ctx: "tone=${ctx.value.tone}";
+          file.config."demo/app.conf" = {
+            facet = "theme";
+            value = context: "tone=${context.value.tone}";
           };
 
-          hook = {
-            demo = {
-              watch = "theme";
-              command = "echo reload";
-            };
-            "demo-generated" = {
-              watch = "theme";
-              command = ctx: "echo tone=${ctx.value.tone}";
+          effect = {
+            demo.exec = ["/bin/echo" "reload"];
+            generated = {
+              on = ["theme"];
+              exec = context: ["/bin/echo" "tone=${context.value.tone}"];
             };
           };
         };
@@ -66,52 +59,6 @@
   };
 
   manifest = eval.config.sumi.generated.manifest;
-  expected = builtins.toJSON {
-    version = 3;
-    home = "/home/tester";
-    defaultSelection = {
-      theme = "light";
-    };
-    facets.theme = {
-      default = "light";
-      variants = {
-        dark = {};
-        light = {};
-      };
-    };
-    variantRoots.theme = {
-      dark = "<store>";
-      light = "<store>";
-    };
-    files = [
-      {
-        path = ".config/demo/app.conf";
-        source = {
-          kind = "facet";
-          facet = "theme";
-        };
-      }
-    ];
-    hooks = [
-      {
-        name = "demo";
-        watch = "theme";
-        command = {
-          kind = "static";
-          value = "echo reload";
-        };
-      }
-      {
-        name = "demo-generated";
-        watch = "theme";
-        command = {
-          kind = "facet";
-          facet = "theme";
-          variants = {};
-        };
-      }
-    ];
-  };
 in
   pkgs.runCommand "sumi-manifest-shape-test" {
     nativeBuildInputs = [pkgs.nushell];
@@ -119,10 +66,9 @@ in
     set -eu
 
     manifest=${lib.escapeShellArg (toString manifest)}
-    expected=${lib.escapeShellArg expected}
     test -f "$manifest"
 
-    ${pkgs.nushell}/bin/nu ${./manifest-shape.nu} "$manifest" "$expected"
+    ${pkgs.nushell}/bin/nu ${./manifest-shape.nu} "$manifest"
 
     touch "$out"
   ''
