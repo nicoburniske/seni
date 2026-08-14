@@ -1,5 +1,5 @@
 use crate::error::{error, Context, Error};
-use crate::manifest::{Config, RawSelection, Selection};
+use crate::manifest::{Config, NamedSelection, RawSelection, Selection};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -70,9 +70,9 @@ pub fn switch(
     for (facet_id, name, facet) in config.facets() {
         let variant_id = selection[facet_id];
         let (value, variant) = facet.variant(variant_id);
-        let metadata = fs::metadata(variant.root()).context(format_args!(
+        let metadata = fs::metadata(&variant.root).context(format_args!(
             "could not inspect variant root '{}'",
-            variant.root().display()
+            variant.root.display()
         ))?;
         if !metadata.is_dir() {
             return Err(error!("root for {name}={value} is not a directory"));
@@ -129,14 +129,20 @@ pub fn switch(
             "could not create generation selection '{}'",
             selection_path.display()
         ))?;
-        serde_json::to_writer_pretty(selection_file, &config.named_selection(&selection))
-            .context("could not serialize selection")?;
+        serde_json::to_writer_pretty(
+            selection_file,
+            &NamedSelection {
+                config,
+                selection: &selection,
+            },
+        )
+        .context("could not serialize selection")?;
 
         for (facet_id, name, facet) in config.facets() {
             let variant_id = selection[facet_id];
             let variant = facet.variant(variant_id).1;
             let link = root_dir.join(name);
-            symlink(variant.root(), &link).context(format_args!(
+            symlink(&variant.root, &link).context(format_args!(
                 "could not link selected variant '{}'",
                 link.display()
             ))?;
@@ -245,7 +251,7 @@ mod tests {
     fn variant_root<'a>(config: &'a Config, facet: &str, variant: &str) -> &'a Path {
         let facet_id = config.facet_id(facet).unwrap();
         let variant_id = config[facet_id].variant_id(variant).unwrap();
-        config[facet_id].variant(variant_id).1.root()
+        &config[facet_id].variant(variant_id).1.root
     }
 
     #[test]

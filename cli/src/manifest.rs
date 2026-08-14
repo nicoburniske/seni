@@ -17,27 +17,27 @@ pub struct VariantId(usize);
 
 #[derive(Debug)]
 pub struct Config {
-    home: PathBuf,
-    facets: IndexMap<Box<str>, Facet>,
-    files: Box<[ManagedFile]>,
-    effects: Box<[Effect]>,
+    pub home: PathBuf,
+    pub facets: IndexMap<Box<str>, Facet>,
+    pub files: Box<[ManagedFile]>,
+    pub effects: Box<[Effect]>,
 }
 
 #[derive(Debug)]
 pub struct Facet {
-    default: VariantId,
-    variants: IndexMap<Box<str>, Variant>,
+    pub default: VariantId,
+    pub variants: IndexMap<Box<str>, Variant>,
 }
 
 #[derive(Debug)]
 pub struct Variant {
-    root: PathBuf,
+    pub root: PathBuf,
 }
 
 #[derive(Debug)]
 pub struct ManagedFile {
-    path: Box<str>,
-    source: Source,
+    pub path: Box<str>,
+    pub source: Source,
 }
 
 #[derive(Debug)]
@@ -48,9 +48,9 @@ pub enum Source {
 
 #[derive(Debug)]
 pub struct Effect {
-    name: Box<str>,
-    on: Box<[FacetId]>,
-    exec: EffectExec,
+    pub name: Box<str>,
+    pub on: Box<[FacetId]>,
+    pub exec: EffectExec,
 }
 
 #[derive(Debug)]
@@ -81,7 +81,13 @@ impl Config {
 
         let mut facets = IndexMap::with_capacity(raw.facets.len());
         for (name, raw_facet) in raw.facets {
-            validate_facet_name(&name)?;
+            if name.is_empty()
+                || name.as_ref() == "."
+                || name.as_ref() == ".."
+                || name.contains('/')
+            {
+                return Err(error!("facet name '{name}' must be one path segment"));
+            }
             if raw_facet.variants.is_empty() {
                 return Err(error!("facet '{name}' has no variants"));
             }
@@ -108,7 +114,14 @@ impl Config {
 
         let mut files = Vec::with_capacity(raw.files.len());
         for (path, raw_file) in raw.files {
-            validate_managed_path(&path)?;
+            if path
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+            {
+                return Err(error!(
+                    "managed file path '{path}' must be a normalized relative path"
+                ));
+            }
             let source =
                 match raw_file {
                     RawManagedFile::Static(source) => {
@@ -208,23 +221,11 @@ impl Config {
         self.facets.get_index_of(name).map(FacetId)
     }
 
-    pub fn home(&self) -> &Path {
-        &self.home
-    }
-
     pub fn facets(&self) -> impl ExactSizeIterator<Item = (FacetId, &str, &Facet)> {
         self.facets
             .iter()
             .enumerate()
             .map(|(index, (name, facet))| (FacetId(index), name.as_ref(), facet))
-    }
-
-    pub fn files(&self) -> &[ManagedFile] {
-        &self.files
-    }
-
-    pub fn effects(&self) -> &[Effect] {
-        &self.effects
     }
 
     pub fn default_selection(&self) -> Selection {
@@ -256,13 +257,6 @@ impl Config {
 
         Ok(selection)
     }
-
-    pub fn named_selection<'a>(&'a self, selection: &'a Selection) -> NamedSelection<'a> {
-        NamedSelection {
-            config: self,
-            selection,
-        }
-    }
 }
 
 impl Facet {
@@ -273,36 +267,6 @@ impl Facet {
     pub fn variant(&self, id: VariantId) -> (&str, &Variant) {
         let (name, variant) = self.variants.get_index(id.0).unwrap();
         (name, variant)
-    }
-}
-
-impl Variant {
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-}
-
-impl ManagedFile {
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    pub fn source(&self) -> &Source {
-        &self.source
-    }
-}
-
-impl Effect {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn on(&self) -> &[FacetId] {
-        &self.on
-    }
-
-    pub fn exec(&self) -> &EffectExec {
-        &self.exec
     }
 }
 
@@ -337,8 +301,8 @@ impl IndexMut<FacetId> for Selection {
 }
 
 pub struct NamedSelection<'a> {
-    config: &'a Config,
-    selection: &'a Selection,
+    pub config: &'a Config,
+    pub selection: &'a Selection,
 }
 
 impl Serialize for NamedSelection<'_> {
@@ -354,25 +318,6 @@ impl Serialize for NamedSelection<'_> {
         }
         map.end()
     }
-}
-
-fn validate_facet_name(name: &str) -> crate::Result<()> {
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
-        return Err(error!("facet name '{name}' must be one path segment"));
-    }
-    Ok(())
-}
-
-fn validate_managed_path(path: &str) -> crate::Result<()> {
-    if path
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return Err(error!(
-            "managed file path '{path}' must be a normalized relative path"
-        ));
-    }
-    Ok(())
 }
 
 fn parse_argv(name: &str, argv: Vec<Box<str>>) -> crate::Result<Argv> {
@@ -500,7 +445,11 @@ mod tests {
 
         assert_eq!(selection[theme], VariantId(0));
         assert_eq!(
-            serde_json::to_value(config.named_selection(&selection)).unwrap(),
+            serde_json::to_value(NamedSelection {
+                config: &config,
+                selection: &selection,
+            })
+            .unwrap(),
             json!({"theme": "light"})
         );
     }

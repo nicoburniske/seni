@@ -53,7 +53,7 @@ fn main() -> ExitCode {
         let state_dir = cli
             .state_dir
             .or_else(|| env::var_os("SUMI_STATE_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| config.home().join(".local/state/sumi"));
+            .unwrap_or_else(|| config.home.join(".local/state/sumi"));
         let state_dir = if state_dir.is_absolute() {
             state_dir
         } else {
