@@ -114,70 +114,59 @@ pub fn switch(
         "could not create runtime generation '{}'",
         generation_dir.display()
     ))?;
+    let mut pending = PendingGeneration {
+        path: generation_dir,
+        pointer: current_tmp,
+        committed: false,
+    };
 
-    let build_result: crate::Result<()> = (|| {
-        let root_dir = generation_dir.join("root");
-        fs::create_dir(&root_dir).context(format_args!(
-            "could not create generation roots '{}'",
-            root_dir.display()
-        ))?;
-        let generation_manifest = generation_dir.join("manifest");
-        symlink(manifest_path, &generation_manifest).context(format_args!(
-            "could not link generation manifest '{}'",
-            generation_manifest.display()
-        ))?;
-        let selection_path = generation_dir.join("selection.json");
-        let selection_file = fs::File::create(&selection_path).context(format_args!(
-            "could not create generation selection '{}'",
-            selection_path.display()
-        ))?;
-        serde_json::to_writer_pretty(
-            selection_file,
-            &NamedSelection {
-                config,
-                selection: &selection,
-            },
-        )
-        .context("could not serialize selection")?;
+    let root_dir = pending.path.join("root");
+    fs::create_dir(&root_dir).context(format_args!(
+        "could not create generation roots '{}'",
+        root_dir.display()
+    ))?;
+    let generation_manifest = pending.path.join("manifest");
+    symlink(manifest_path, &generation_manifest).context(format_args!(
+        "could not link generation manifest '{}'",
+        generation_manifest.display()
+    ))?;
+    let selection_path = pending.path.join("selection.json");
+    let selection_file = fs::File::create(&selection_path).context(format_args!(
+        "could not create generation selection '{}'",
+        selection_path.display()
+    ))?;
+    serde_json::to_writer_pretty(
+        selection_file,
+        &NamedSelection {
+            config,
+            selection: &selection,
+        },
+    )
+    .context("could not serialize selection")?;
 
-        for (facet_id, name, facet) in config.facets() {
-            let variant_id = selection[facet_id];
-            let variant = facet.variant(variant_id).1;
-            let link = root_dir.join(name);
-            symlink(&variant.root, &link).context(format_args!(
-                "could not link selected variant '{}'",
-                link.display()
-            ))?;
-        }
-
-        Ok(())
-    })();
-    if let Err(error) = build_result {
-        let _ = fs::remove_dir_all(&generation_dir);
-        return Err(error);
+    for (facet_id, name, facet) in config.facets() {
+        let variant_id = selection[facet_id];
+        let variant = facet.variant(variant_id).1;
+        let link = root_dir.join(name);
+        symlink(&variant.root, &link).context(format_args!(
+            "could not link selected variant '{}'",
+            link.display()
+        ))?;
     }
 
-    let pointer = symlink(
+    symlink(
         PathBuf::from("generations").join(&generation_id),
-        &current_tmp,
+        &pending.pointer,
     )
     .context(format_args!(
         "could not create current pointer '{}'",
-        current_tmp.display()
-    ));
-    if let Err(error) = pointer {
-        let _ = fs::remove_dir_all(&generation_dir);
-        return Err(error);
-    }
-    let replace = fs::rename(&current_tmp, &current).context(format_args!(
+        pending.pointer.display()
+    ))?;
+    fs::rename(&pending.pointer, &current).context(format_args!(
         "could not replace current pointer '{}'",
         current.display()
-    ));
-    if let Err(error) = replace {
-        let _ = fs::remove_file(&current_tmp);
-        let _ = fs::remove_dir_all(&generation_dir);
-        return Err(error);
-    }
+    ))?;
+    pending.committed = true;
 
     crate::effects::run(
         config.effects.iter().filter(|effect| {
@@ -187,6 +176,21 @@ pub fn switch(
     )?;
 
     Ok(selection)
+}
+
+struct PendingGeneration {
+    path: PathBuf,
+    pointer: PathBuf,
+    committed: bool,
+}
+
+impl Drop for PendingGeneration {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.pointer);
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +373,19 @@ mod tests {
         )
         .is_err());
         assert_eq!(fs::read_link(state.join("current")).unwrap(), current);
+    }
+
+    #[test]
+    fn failed_generation_is_removed() {
+        let temp = TestDir::new("failed-generation");
+        let (mut config, manifest_path, state) = fixture(&temp.0, false);
+        let (_, facet) = config.facets.shift_remove_index(0).unwrap();
+        config.facets.insert("missing/theme".into(), facet);
+
+        assert!(switch(&config, &manifest_path, &state, &[]).is_err());
+
+        assert_eq!(fs::read_dir(state.join("generations")).unwrap().count(), 0);
+        assert!(!state.join(".current").exists());
     }
 
     #[test]
