@@ -22,7 +22,7 @@
 
         config.sumi = {
           enable = true;
-          homeDirectory = "/home/tester";
+          path.home = "/home/tester";
 
           facet.theme = {
             default = "light";
@@ -52,7 +52,10 @@
           };
 
           effect = {
-            static.exec = ["/bin/echo" fixture];
+            static = {
+              exec = ["/bin/echo" fixture];
+              ignoreFailure = true;
+            };
             dynamic = {
               on = ["theme"];
               exec = context: ["/bin/echo" context.value.asset];

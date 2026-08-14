@@ -708,11 +708,13 @@ mod tests {
                 name: "always".into(),
                 on: Box::default(),
                 exec: EffectExec::Static(command(&recorder, &["always", log.to_str().unwrap()])),
+                ignore_failure: false,
             },
             Effect {
                 name: "density".into(),
                 on: vec![density].into_boxed_slice(),
                 exec: EffectExec::Static(command(&recorder, &["density", log.to_str().unwrap()])),
+                ignore_failure: false,
             },
             Effect {
                 name: "theme".into(),
@@ -721,6 +723,7 @@ mod tests {
                     facet: theme,
                     variants,
                 },
+                ignore_failure: false,
             },
         ]
         .into_boxed_slice();
@@ -741,6 +744,7 @@ mod tests {
             name: "activation".into(),
             on: vec![density].into_boxed_slice(),
             exec: EffectExec::Static(command(&recorder, &["activation", log.to_str().unwrap()])),
+            ignore_failure: false,
         }]
         .into_boxed_slice();
         let selection = activate(&new_config, &new_manifest, &state).unwrap();
@@ -812,11 +816,13 @@ mod tests {
                 name: "failure".into(),
                 on: vec![theme].into_boxed_slice(),
                 exec: EffectExec::Static(command(&failure, &[])),
+                ignore_failure: true,
             },
             Effect {
                 name: "timeout".into(),
                 on: vec![theme].into_boxed_slice(),
                 exec: EffectExec::Static(command(&timeout, &[])),
+                ignore_failure: false,
             },
             Effect {
                 name: "first".into(),
@@ -825,6 +831,7 @@ mod tests {
                     &barrier,
                     &[first.to_str().unwrap(), second.to_str().unwrap()],
                 )),
+                ignore_failure: false,
             },
             Effect {
                 name: "second".into(),
@@ -833,6 +840,7 @@ mod tests {
                     &barrier,
                     &[second.to_str().unwrap(), first.to_str().unwrap()],
                 )),
+                ignore_failure: false,
             },
         ]
         .into_boxed_slice();
@@ -847,8 +855,7 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(error.contains("effect 'failure' exited with exit status: 7"));
-        assert!(error.contains("stderr:\nbroken"));
+        assert!(!error.contains("effect 'failure'"));
         assert!(error.contains("effect 'timeout' timed out"));
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(first.exists());

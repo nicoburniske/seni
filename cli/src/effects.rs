@@ -57,6 +57,7 @@ pub fn run<'a>(
         running.push(RunningEffect {
             result,
             name: &effect.name,
+            ignore_failure: effect.ignore_failure,
             process: Some(Process {
                 child,
                 stdout: Capture::new(stdout),
@@ -167,9 +168,11 @@ pub fn run<'a>(
 
             let mut process = effect.process.take().unwrap();
             let result = match completion {
-                Completion::Exited(status) => finish(effect.name, process, status, false),
+                Completion::Exited(status) => {
+                    finish(effect.name, process, status, false, effect.ignore_failure)
+                }
                 Completion::TimedOut => match terminate(&mut process.child) {
-                    Ok(status) => finish(effect.name, process, status, true),
+                    Ok(status) => finish(effect.name, process, status, true, effect.ignore_failure),
                     Err(context) => Err(Error::context(
                         format_args!("could not terminate effect '{}'", effect.name),
                         context,
@@ -216,6 +219,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 struct RunningEffect<'a> {
     result: usize,
     name: &'a str,
+    ignore_failure: bool,
     process: Option<Process>,
 }
 
@@ -299,6 +303,7 @@ fn finish(
     mut process: Process,
     status: ExitStatus,
     timed_out: bool,
+    ignore_failure: bool,
 ) -> crate::Result<()> {
     process.stdout.drain().context(format_args!(
         "could not capture stdout from effect '{name}'"
@@ -327,7 +332,7 @@ fn finish(
             output,
         ));
     }
-    if !status.success() {
+    if !status.success() && !ignore_failure {
         if output.is_empty() {
             return Err(error!("effect '{name}' exited with {status}"));
         }

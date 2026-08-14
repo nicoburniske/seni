@@ -20,7 +20,7 @@
 
       config = lib.mkIf config.sumi.enable {
         system.userActivationScripts.sumi = ''
-          if [ "$HOME" = ${lib.escapeShellArg config.sumi.homeDirectory} ]; then
+          if [ "$HOME" = ${lib.escapeShellArg config.sumi.path.home} ]; then
             ${config.sumi.package}/bin/sumi activate
           fi
         '';
@@ -37,8 +37,8 @@
       config = lib.mkIf config.sumi.enable {
         assertions = [
           {
-            assertion = config.system.primaryUser == null || config.sumi.homeDirectory == config.system.primaryUserHome;
-            message = "sumi.homeDirectory must be the nix-darwin primary user's home";
+            assertion = config.system.primaryUser == null || config.sumi.path.home == config.system.primaryUserHome;
+            message = "sumi.path.home must be the nix-darwin primary user's home";
           }
         ];
 

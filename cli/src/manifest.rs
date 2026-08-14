@@ -51,6 +51,7 @@ pub struct Effect {
     pub name: Box<str>,
     pub on: Box<[FacetId]>,
     pub exec: EffectExec,
+    pub ignore_failure: bool,
 }
 
 #[derive(Debug)]
@@ -206,6 +207,7 @@ impl Config {
                 name,
                 on: on.into_boxed_slice(),
                 exec,
+                ignore_failure: raw_effect.ignore_failure,
             });
         }
 
@@ -371,6 +373,8 @@ struct RawEffect {
     #[serde(default)]
     on: Vec<Box<str>>,
     exec: RawEffectExec,
+    #[serde(default, rename = "ignoreFailure")]
+    ignore_failure: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -405,7 +409,7 @@ mod tests {
             ".config/static": "/nix/store/static"
         },
         "effects": {
-            "always": {"exec": ["/bin/true"]},
+            "always": {"exec": ["/bin/true"], "ignoreFailure": true},
             "reload": {
                 "on": ["theme"],
                 "exec": {
@@ -437,6 +441,7 @@ mod tests {
         assert_eq!(theme, FacetId(0));
         assert_eq!(facet.default, VariantId(1));
         assert!(matches!(config.files[0].source, Source::Facet(id) if id == theme));
+        assert!(config.effects[0].ignore_failure);
         assert_eq!(config.effects[1].on.as_ref(), [theme]);
         assert!(matches!(
             &config.effects[1].exec,

@@ -49,6 +49,7 @@ def main [manifest_path: string source_path: string] {
 
   assert-equal ($manifest.effects | columns | sort) [dynamic static] "effects"
   assert-equal $manifest.effects.static.on [] "static effect filter"
+  assert-equal $manifest.effects.static.ignoreFailure true "ignored static effect failure"
   assert-equal ($manifest.effects.static.exec | first) "/bin/echo" "static effect executable"
   let static_argument = $manifest.effects.static.exec | get 1
   assert-true ($static_argument != $source_path) "static effect argument was not materialized"

@@ -54,6 +54,12 @@
         type = types.oneOf [argvType (types.functionTo argvType)];
         description = "effect argv";
       };
+
+      ignoreFailure = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = "whether to ignore a nonzero exit status";
+      };
     };
   };
 
@@ -97,38 +103,40 @@ in {
       description = "effects keyed by name";
     };
 
-    homeDirectory = lib.mkOption {
-      type = types.str;
-      description = "home directory managed by Sumi";
-    };
+    path = {
+      home = lib.mkOption {
+        type = types.str;
+        description = "home directory managed by Sumi";
+      };
 
-    configHome = lib.mkOption {
-      type = types.str;
-      default = "${cfg.homeDirectory}/.config";
-      description = "XDG config directory";
-    };
+      config = lib.mkOption {
+        type = types.str;
+        default = "${cfg.path.home}/.config";
+        description = "XDG config directory";
+      };
 
-    cacheHome = lib.mkOption {
-      type = types.str;
-      default = "${cfg.homeDirectory}/.cache";
-      description = "XDG cache directory";
-    };
+      cache = lib.mkOption {
+        type = types.str;
+        default = "${cfg.path.home}/.cache";
+        description = "XDG cache directory";
+      };
 
-    dataHome = lib.mkOption {
-      type = types.str;
-      default = "${cfg.homeDirectory}/.local/share";
-      description = "XDG data directory";
-    };
+      data = lib.mkOption {
+        type = types.str;
+        default = "${cfg.path.home}/.local/share";
+        description = "XDG data directory";
+      };
 
-    stateHome = lib.mkOption {
-      type = types.str;
-      default = "${cfg.homeDirectory}/.local/state";
-      description = "XDG state directory";
+      state = lib.mkOption {
+        type = types.str;
+        default = "${cfg.path.home}/.local/state";
+        description = "XDG state directory";
+      };
     };
 
     stateDirectory = lib.mkOption {
       type = types.str;
-      default = "${cfg.stateHome}/sumi";
+      default = "${cfg.path.state}/sumi";
       description = "Sumi runtime state directory";
     };
 
@@ -146,18 +154,12 @@ in {
   };
 
   config = lib.mkIf cfg.enable (let
-    directories = {
-      home = cfg.homeDirectory;
-      config = cfg.configHome;
-      cache = cfg.cacheHome;
-      data = cfg.dataHome;
-      state = cfg.stateHome;
-    };
+    directories = cfg.path;
     roots = lib.mapAttrs (_: directory:
-      if directory == cfg.homeDirectory
+      if directory == cfg.path.home
       then ""
-      else if lib.hasPrefix "${cfg.homeDirectory}/" directory
-      then lib.removePrefix "${cfg.homeDirectory}/" directory
+      else if lib.hasPrefix "${cfg.path.home}/" directory
+      then lib.removePrefix "${cfg.path.home}/" directory
       else null)
     directories;
 
@@ -211,7 +213,7 @@ in {
 
     manifestEffects =
       lib.mapAttrs (_: effect: {
-        inherit (effect) on;
+        inherit (effect) on ignoreFailure;
         exec =
           if lib.isFunction effect.exec
           then let
@@ -232,7 +234,7 @@ in {
 
     manifest = {
       version = 4;
-      home = cfg.homeDirectory;
+      home = cfg.path.home;
       facets =
         lib.mapAttrs (facet: data: {
           inherit (data) default;
@@ -253,10 +255,10 @@ in {
     };
     manifestPath = pkgs.writeText "sumi-manifest.json" (builtins.toJSON manifest);
     wrapperEnvironment = {
-      XDG_CONFIG_HOME = cfg.configHome;
-      XDG_CACHE_HOME = cfg.cacheHome;
-      XDG_DATA_HOME = cfg.dataHome;
-      XDG_STATE_HOME = cfg.stateHome;
+      XDG_CONFIG_HOME = cfg.path.config;
+      XDG_CACHE_HOME = cfg.path.cache;
+      XDG_DATA_HOME = cfg.path.data;
+      XDG_STATE_HOME = cfg.path.state;
       SUMI_MANIFEST = manifestPath;
       SUMI_STATE_DIR = cfg.stateDirectory;
     };
@@ -292,7 +294,7 @@ in {
       }
       {
         assertion = lib.all (kind: cfg.file.${kind} == {} || roots.${kind} != null) fileKinds;
-        message = "Sumi file directories must be within sumi.homeDirectory";
+        message = "Sumi file directories must be within sumi.path.home";
       }
       {
         assertion = lib.all (file: file.valid) files;
