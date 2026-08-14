@@ -190,7 +190,7 @@ impl Config {
                         for variant in definition.variants.keys() {
                             let argv =
                                 variants
-                                    .shift_remove(variant.as_ref())
+                                    .swap_remove(variant.as_ref())
                                     .context(format_args!(
                                 "effect '{name}' command variants do not match facet '{facet}'"
                             ))?;
