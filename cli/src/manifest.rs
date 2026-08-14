@@ -270,6 +270,15 @@ impl Facet {
     }
 }
 
+impl EffectExec {
+    pub fn resolve<'a>(&'a self, selection: &Selection) -> &'a Argv {
+        match self {
+            Self::Static(argv) => argv,
+            Self::Facet { facet, variants } => &variants[selection[*facet].0],
+        }
+    }
+}
+
 impl Index<FacetId> for Config {
     type Output = Facet;
 

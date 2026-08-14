@@ -54,6 +54,7 @@ pub fn switch(
         }
     };
 
+    let mut requested = Vec::with_capacity(sets.len());
     for set in sets {
         let Some((name, value)) = set.split_once('=') else {
             return Err(error!("'{set}' must have the form facet=value"));
@@ -65,6 +66,7 @@ pub fn switch(
             .variant_id(value)
             .context(format_args!("unknown value '{value}' for facet '{name}'"))?;
         selection[facet_id] = variant_id;
+        requested.push(facet_id);
     }
 
     for (facet_id, name, facet) in config.facets() {
@@ -177,14 +179,24 @@ pub fn switch(
         return Err(error);
     }
 
+    crate::effects::run(
+        config.effects.iter().filter(|effect| {
+            effect.on.is_empty() || effect.on.iter().any(|facet| requested.contains(facet))
+        }),
+        &selection,
+    )?;
+
     Ok(selection)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::{Argv, Effect, EffectExec};
     use serde_json::{json, Map, Value};
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
 
     struct TestDir(PathBuf);
 
@@ -252,6 +264,22 @@ mod tests {
         let facet_id = config.facet_id(facet).unwrap();
         let variant_id = config[facet_id].variant_id(variant).unwrap();
         &config[facet_id].variant(variant_id).1.root
+    }
+
+    fn script(temp: &Path, name: &str, body: &str) -> PathBuf {
+        let path = temp.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    fn command(program: &Path, arguments: &[&str]) -> Argv {
+        let mut argv = Vec::with_capacity(arguments.len() + 1);
+        argv.push(program.to_string_lossy().into_owned().into_boxed_str());
+        argv.extend(arguments.iter().map(|argument| Box::from(*argument)));
+        argv.into_boxed_slice()
     }
 
     #[test]
@@ -361,5 +389,158 @@ mod tests {
         fs::create_dir_all(state.join("current")).unwrap();
 
         assert!(switch(&config, &manifest_path, &state, &[]).is_err());
+    }
+
+    #[test]
+    fn runs_only_matching_effects() {
+        let temp = TestDir::new("effects");
+        let (mut config, manifest_path, state) = fixture(&temp.0, true);
+        let log = temp.0.join("effects.log");
+        let recorder = script(&temp.0, "record", "printf '%s\\n' \"$1\" >> \"$2\"");
+        let theme = config.facet_id("theme").unwrap();
+        let density = config.facet_id("density").unwrap();
+        let variants = config[theme]
+            .variants
+            .keys()
+            .map(|variant| command(&recorder, &[variant, log.to_str().unwrap()]))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        config.effects = vec![
+            Effect {
+                name: "always".into(),
+                on: Box::default(),
+                exec: EffectExec::Static(command(&recorder, &["always", log.to_str().unwrap()])),
+            },
+            Effect {
+                name: "density".into(),
+                on: vec![density].into_boxed_slice(),
+                exec: EffectExec::Static(command(&recorder, &["density", log.to_str().unwrap()])),
+            },
+            Effect {
+                name: "theme".into(),
+                on: vec![theme].into_boxed_slice(),
+                exec: EffectExec::Facet {
+                    facet: theme,
+                    variants,
+                },
+            },
+        ]
+        .into_boxed_slice();
+
+        switch(&config, &manifest_path, &state, &[]).unwrap();
+        switch(&config, &manifest_path, &state, &["theme=dark".to_string()]).unwrap();
+
+        let effects = fs::read_to_string(log).unwrap();
+        assert_eq!(
+            effects.lines().filter(|effect| *effect == "always").count(),
+            2
+        );
+        assert_eq!(
+            effects.lines().filter(|effect| *effect == "dark").count(),
+            1
+        );
+        assert!(!effects.lines().any(|effect| effect == "density"));
+    }
+
+    #[test]
+    fn effect_failure_does_not_roll_back_generation() {
+        let temp = TestDir::new("effect-failure");
+        let (mut config, manifest_path, state) = fixture(&temp.0, false);
+        let failure = script(&temp.0, "fail", "printf 'broken' >&2\nexit 7");
+        let log = temp.0.join("effects.log");
+        let recorder = script(&temp.0, "record-after-failure", ": > \"$1\"");
+        let theme = config.facet_id("theme").unwrap();
+        config.effects = vec![
+            Effect {
+                name: "reload".into(),
+                on: vec![theme].into_boxed_slice(),
+                exec: EffectExec::Static(command(&failure, &[])),
+            },
+            Effect {
+                name: "after".into(),
+                on: vec![theme].into_boxed_slice(),
+                exec: EffectExec::Static(command(&recorder, &[log.to_str().unwrap()])),
+            },
+        ]
+        .into_boxed_slice();
+
+        let error = switch(
+            &config,
+            &manifest_path,
+            &state,
+            &["theme=light".to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("effect 'reload' exited with exit status: 7"));
+        assert!(error.contains("stderr:\nbroken"));
+        assert!(log.exists());
+        assert_eq!(
+            serde_json::from_reader::<_, Value>(
+                fs::File::open(state.join("current/selection.json")).unwrap()
+            )
+            .unwrap(),
+            json!({"theme": "light"})
+        );
+    }
+
+    #[test]
+    fn effect_timeout_does_not_roll_back_generation() {
+        let temp = TestDir::new("effect-timeout");
+        let (mut config, manifest_path, state) = fixture(&temp.0, false);
+        let timeout = script(&temp.0, "timeout", "sleep 5");
+        config.effects = vec![Effect {
+            name: "stuck".into(),
+            on: Box::default(),
+            exec: EffectExec::Static(command(&timeout, &[])),
+        }]
+        .into_boxed_slice();
+
+        let started = Instant::now();
+        let error = switch(&config, &manifest_path, &state, &[])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("effect 'stuck' timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(state.join("current/selection.json").exists());
+    }
+
+    #[test]
+    fn runs_effects_concurrently() {
+        let temp = TestDir::new("effect-concurrency");
+        let (mut config, manifest_path, state) = fixture(&temp.0, false);
+        let barrier = script(
+            &temp.0,
+            "barrier",
+            ": > \"$1\"\nwhile [ ! -e \"$2\" ]; do :; done",
+        );
+        let first = temp.0.join("first");
+        let second = temp.0.join("second");
+        config.effects = vec![
+            Effect {
+                name: "first".into(),
+                on: Box::default(),
+                exec: EffectExec::Static(command(
+                    &barrier,
+                    &[first.to_str().unwrap(), second.to_str().unwrap()],
+                )),
+            },
+            Effect {
+                name: "second".into(),
+                on: Box::default(),
+                exec: EffectExec::Static(command(
+                    &barrier,
+                    &[second.to_str().unwrap(), first.to_str().unwrap()],
+                )),
+            },
+        ]
+        .into_boxed_slice();
+
+        switch(&config, &manifest_path, &state, &[]).unwrap();
+
+        assert!(first.exists());
+        assert!(second.exists());
     }
 }
