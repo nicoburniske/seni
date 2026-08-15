@@ -2,9 +2,14 @@
   description = "seni: runtime config switching for nix";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nix-darwin = {
+    url = "github:nix-darwin/nix-darwin/nix-darwin-26.05";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs = {
     self,
+    nix-darwin,
     nixpkgs,
     ...
   }: let
@@ -24,9 +29,14 @@
 
     checks = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
-    in {
-      manifest = pkgs.callPackage ./nix/tests/manifest.nix {};
-    });
+    in
+      {
+        darwin-module = pkgs.callPackage ./nix/tests/darwin.nix {darwin = nix-darwin;};
+        manifest = pkgs.callPackage ./nix/tests/manifest.nix {};
+      }
+      // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        multi-user = pkgs.callPackage ./nix/tests/multi-user.nix {};
+      });
 
     devShells = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};

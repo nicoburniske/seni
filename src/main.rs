@@ -17,11 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(
-    name = "seni",
-    version,
-    about = "runtime config switching for nix"
-)]
+#[command(name = "seni", version, about = "runtime config switching for nix")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -71,9 +67,40 @@ enum Command {
 
 fn main() -> ExitCode {
     let result: crate::Result<()> = (|| {
-        let cli = Cli::parse();
-        let manifest_path = cli
-            .manifest
+        let Cli {
+            command,
+            manifest,
+            state_dir,
+        } = Cli::parse();
+        let absolute = |path: PathBuf| -> crate::Result<PathBuf> {
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                Ok(env::current_dir().context("current directory")?.join(path))
+            }
+        };
+
+        if let Command::Deactivate = &command {
+            let state_dir = state_dir
+                .or_else(|| env::var_os("SENI_STATE_DIR").map(PathBuf::from))
+                .context("state directory not configured; use --state-dir or SENI_STATE_DIR")?;
+            let state_dir = absolute(state_dir)?;
+            let summary = engine::deactivate(&state_dir)?;
+            println!(
+                "removed={} missing={} changed={} failed={}",
+                summary.removed, summary.missing, summary.changed, summary.failed
+            );
+            if summary.failed != 0 {
+                return Err(error!(
+                    "deactivation incomplete: {} managed links remain",
+                    summary.failed
+                ));
+            }
+            println!("deactivated configuration");
+            return Ok(());
+        }
+
+        let manifest_path = manifest
             .or_else(|| env::var_os("SENI_MANIFEST").map(PathBuf::from))
             .context("manifest not configured; use --manifest or SENI_MANIFEST")?;
         let manifest_path = fs::canonicalize(&manifest_path)
@@ -82,37 +109,17 @@ fn main() -> ExitCode {
             .context(format_args!("manifest '{}'", manifest_path.display()))?;
         let config = Config::parse(manifest_file)?;
 
-        let state_dir = cli
-            .state_dir
+        let state_dir = state_dir
             .or_else(|| env::var_os("SENI_STATE_DIR").map(PathBuf::from))
             .unwrap_or_else(|| config.home.join(".local/state/seni"));
-        let state_dir = if state_dir.is_absolute() {
-            state_dir
-        } else {
-            env::current_dir()
-                .context("current directory")?
-                .join(state_dir)
-        };
+        let state_dir = absolute(state_dir)?;
 
-        match cli.command {
+        match command {
             Command::Activate => {
                 engine::activate(&config, &manifest_path, &state_dir)?;
                 println!("activated configuration");
             }
-            Command::Deactivate => {
-                let summary = engine::deactivate(&state_dir)?;
-                println!(
-                    "removed={} missing={} changed={} failed={}",
-                    summary.removed, summary.missing, summary.changed, summary.failed
-                );
-                if summary.failed != 0 {
-                    return Err(error!(
-                        "deactivation incomplete: {} managed links remain",
-                        summary.failed
-                    ));
-                }
-                println!("deactivated configuration");
-            }
+            Command::Deactivate => unreachable!(),
             Command::Facets { facet, json } => {
                 let selection = engine::current_selection(&config, &state_dir)?;
                 if let Some(name) = facet {

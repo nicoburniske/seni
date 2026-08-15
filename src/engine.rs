@@ -131,6 +131,18 @@ pub fn activate(
 }
 
 pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
+    match fs::symlink_metadata(state_dir) {
+        Ok(_) => {}
+        Err(context) if context.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Deactivation::default())
+        }
+        Err(context) => {
+            return Err(Error::context(
+                format_args!("state directory '{}'", state_dir.display()),
+                context,
+            ))
+        }
+    }
     let state = LockedState::open(state_dir)?;
     let Some(config) = state.current_config()? else {
         state.clear()?;
@@ -625,6 +637,27 @@ mod tests {
         argv.push(program.to_string_lossy().into_owned().into_boxed_str());
         argv.extend(arguments.iter().map(|argument| Box::from(*argument)));
         argv.into_boxed_slice()
+    }
+
+    #[test]
+    fn deactivation_does_not_create_missing_state() {
+        let temp = TestDir::new("deactivate-missing");
+        let state = temp.0.join("state");
+        let summary = deactivate(&state).unwrap();
+
+        assert_eq!(
+            (
+                summary.removed,
+                summary.missing,
+                summary.changed,
+                summary.failed
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            fs::symlink_metadata(state).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]

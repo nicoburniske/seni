@@ -12,24 +12,38 @@ facets can represent themes, system fan curves, or any other setting you want to
 
 ```nix
 seni = {
-  enable = true;
-  path.home = "/home/you";
+  users = {
+    alice = {
+      facet.theme = {
+        default = "light";
+        variants = {
+          light = "light";
+          dark = "dark";
+        };
+      };
 
-  facet.theme = {
-    default = "light";
-    variants = {
-      light = "light";
-      dark = "dark";
+      file.config."app/theme" = {
+        facet = "theme";
+        value = {value, ...}: "theme = ${value}";
+      };
     };
-  };
 
-  file.config."app/theme" = {
-    facet = "theme";
-    value = {value, ...}: "theme = ${value}";
+    bob = {
+      facet.theme = {
+        default = "dark";
+        variants = {
+          light = "light";
+          dark = "dark";
+        };
+      };
+    };
   };
 };
 ```
 
+each user has an independent Seni configuration and receives a configured `seni` command:
+
 ```console
 seni switch theme=dark
 ```
+

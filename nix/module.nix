@@ -1,352 +1,118 @@
-{
+{userType}: {
   config,
   lib,
   pkgs,
   ...
 }: let
-  types = lib.types;
   cfg = config.seni;
+  enabledUsers = lib.filterAttrs (_: user: user.enable) cfg.users;
+  users = builtins.attrValues cfg.users;
+  stateDirectories = lib.mapAttrs (_: user: "${user.path.state}/seni") cfg.users;
 
-  fileKinds = ["home" "config" "cache" "data" "state"];
+  userPackages = lib.mapAttrs (name: user:
+    pkgs.writeShellScriptBin "seni" ''
+      export HOME=${lib.escapeShellArg user.path.home}
+      export XDG_CONFIG_HOME=${lib.escapeShellArg user.path.config}
+      export XDG_CACHE_HOME=${lib.escapeShellArg user.path.cache}
+      export XDG_DATA_HOME=${lib.escapeShellArg user.path.data}
+      export XDG_STATE_HOME=${lib.escapeShellArg user.path.state}
+      export SENI_MANIFEST=${lib.escapeShellArg (toString user.generated.manifest)}
+      export SENI_STATE_DIR=${lib.escapeShellArg stateDirectories.${name}}
+      exec ${cfg.cli.package}/bin/seni "$@"
+    '')
+  enabledUsers;
 
-  valueType = types.oneOf [types.str types.path];
-  argvType = types.listOf valueType;
-
-  facetOptionType = types.submodule {
-    options = {
-      default = lib.mkOption {
-        type = types.str;
-        description = "default variant";
-      };
-
-      variants = lib.mkOption {
-        type = types.attrsOf types.anything;
-        default = {};
-        description = "variant payloads";
-      };
-    };
-  };
-
-  fileOptionType = types.submodule {
-    options = {
-      facet = lib.mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = "facet used to generate this file";
-      };
-
-      value = lib.mkOption {
-        type = types.oneOf [valueType (types.functionTo valueType)];
-        description = "file contents or source";
-      };
-    };
-  };
-
-  effectOptionType = types.submodule {
-    options = {
-      on = lib.mkOption {
-        type = types.listOf types.str;
-        default = [];
-        description = "facets that trigger this effect during a switch";
-      };
-
-      exec = lib.mkOption {
-        type = types.oneOf [argvType (types.functionTo argvType)];
-        description = "effect argv";
-      };
-
-      ignoreFailure = lib.mkOption {
-        type = types.bool;
-        default = false;
-        description = "whether to ignore a nonzero exit status";
-      };
-    };
-  };
-
-  materialize = value:
-    if lib.isDerivation value
-    then value
-    else if builtins.isPath value
-    then {
-      outPath = builtins.path {
-        name = lib.strings.sanitizeDerivationName "seni-${baseNameOf (toString value)}";
-        path = value;
-      };
-    }
-    else if builtins.isList value
-    then map materialize value
-    else if builtins.isAttrs value
-    then lib.mapAttrs (_: materialize) value
-    else value;
-
-  renderArgv = map (argument: toString (materialize argument));
+  activation = pkgs.writeShellScript "seni-activate" ''
+    user="$(${pkgs.coreutils}/bin/id -un)"
+    case "$user" in
+      ${lib.concatMapAttrsStringSep "\n" (name: user:
+      if user.enable
+      then ''
+        ${lib.escapeShellArg name})
+          exec ${userPackages.${name}}/bin/seni activate
+          ;;
+      ''
+      else ''
+        ${lib.escapeShellArg name})
+          exec ${cfg.cli.package}/bin/seni --state-dir ${lib.escapeShellArg stateDirectories.${name}} deactivate
+          ;;
+      '')
+    cfg.users}
+      *) exit 0 ;;
+    esac
+  '';
 in {
   options.seni = {
-    enable = lib.mkEnableOption "Seni facet-based runtime config switching";
-
-    facet = lib.mkOption {
-      type = types.attrsOf facetOptionType;
+    users = lib.mkOption {
+      type = lib.types.attrsWith {
+        elemType = userType;
+        placeholder = "username";
+      };
       default = {};
-      description = "facets keyed by name";
+      description = "Seni user configurations";
     };
 
-    file = lib.genAttrs fileKinds (kind:
-      lib.mkOption {
-        type = types.attrsOf fileOptionType;
-        default = {};
-        description = "files in the ${kind} directory";
-      });
+    extraModules = lib.mkOption {
+      type = lib.types.listOf lib.types.deferredModule;
+      default = [];
+      description = "modules evaluated in every Seni user configuration";
+    };
 
-    effect = lib.mkOption {
-      type = types.attrsOf effectOptionType;
+    specialArgs = lib.mkOption {
+      type = lib.types.attrs;
       default = {};
-      description = "effects keyed by name";
+      description = "arguments passed to every Seni user module";
     };
 
-    path = {
-      home = lib.mkOption {
-        type = types.str;
-        description = "home directory managed by Seni";
-      };
-
-      config = lib.mkOption {
-        type = types.str;
-        default = "${cfg.path.home}/.config";
-        description = "XDG config directory";
-      };
-
-      cache = lib.mkOption {
-        type = types.str;
-        default = "${cfg.path.home}/.cache";
-        description = "XDG cache directory";
-      };
-
-      data = lib.mkOption {
-        type = types.str;
-        default = "${cfg.path.home}/.local/share";
-        description = "XDG data directory";
-      };
-
-      state = lib.mkOption {
-        type = types.str;
-        default = "${cfg.path.home}/.local/state";
-        description = "XDG state directory";
-      };
+    cli.package = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ./package.nix {};
+      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix {}";
+      description = "unconfigured Seni CLI package";
     };
 
-    stateDirectory = lib.mkOption {
-      type = types.str;
-      default = "${cfg.path.state}/seni";
-      description = "Seni runtime state directory";
-    };
-
-    generated.manifest = lib.mkOption {
-      type = types.path;
-      readOnly = true;
-      internal = true;
-    };
-
-    package = lib.mkOption {
-      type = types.package;
+    generated.activation = lib.mkOption {
+      type = lib.types.path;
       readOnly = true;
       internal = true;
     };
   };
 
-  config = lib.mkIf cfg.enable (let
-    directories = cfg.path;
-    roots = lib.mapAttrs (_: directory:
-      if directory == cfg.path.home
-      then ""
-      else if lib.hasPrefix "${cfg.path.home}/" directory
-      then lib.removePrefix "${cfg.path.home}/" directory
-      else null)
-    directories;
+  config = {
+    assertions =
+      [
+        {
+          assertion = !(cfg.specialArgs ? name);
+          message = "seni.specialArgs.name is reserved";
+        }
+      ]
+      ++ lib.concatLists (lib.mapAttrsToList (name: user:
+        map (assertion:
+          assertion
+          // {
+            message = "Seni user '${name}': ${assertion.message}";
+          })
+        user.assertions)
+      cfg.users)
+      ++ [
+        {
+          assertion = lib.allUnique (map (user: user.path.home) users);
+          message = "Seni users must have distinct home directories";
+        }
+        {
+          assertion = lib.allUnique (builtins.attrValues stateDirectories);
+          message = "Seni users must have distinct state directories";
+        }
+      ];
 
-    files = lib.concatMap (kind:
-      lib.mapAttrsToList (path: file: {
-        path =
-          if roots.${kind} == null || roots.${kind} == ""
-          then path
-          else "${roots.${kind}}/${path}";
-        valid = lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.splitString "/" path);
-        inherit (file) facet value;
+    warnings = lib.concatLists (lib.mapAttrsToList (name: user: map (warning: "Seni user '${name}': ${warning}") user.warnings) cfg.users);
+
+    users.users =
+      lib.mapAttrs (name: user: {
+        packages = user.packages ++ [userPackages.${name}];
       })
-      cfg.file.${kind})
-    fileKinds;
-    filesByPath = lib.groupBy (file: file.path) files;
-    managedPaths = builtins.attrNames filesByPath;
-    dynamicFilesByFacet = lib.groupBy (file: file.facet) (lib.filter (file: lib.isFunction file.value && file.facet != null) files);
+      enabledUsers;
 
-    resolvedFacets = materialize cfg.facet;
-    context = facet: variant: {
-      inherit variant;
-      value = resolvedFacets.${facet}.variants.${variant};
-    };
-
-    variantRoots = lib.mapAttrs (facet: data: let
-      dynamicFiles = dynamicFilesByFacet.${facet} or [];
-    in
-      lib.mapAttrs (variant: _:
-        if dynamicFiles == []
-        then pkgs.emptyDirectory
-        else
-          pkgs.runCommandLocal (lib.strings.sanitizeDerivationName "seni-${facet}-${variant}") {} ''
-            set -eu
-            mkdir -p "$out"
-            ${lib.concatMapStringsSep "\n" (file: let
-              value = materialize (file.value (context facet variant));
-            in
-              ''
-                target="$out"/${lib.escapeShellArg file.path}
-                mkdir -p "$(dirname "$target")"
-              ''
-              + (
-                if builtins.isString value
-                then ''printf '%s' ${lib.escapeShellArg value} > "$target"''
-                else ''ln -s ${lib.escapeShellArg (toString value)} "$target"''
-              ))
-            dynamicFiles}
-          '')
-      data.variants)
-    cfg.facet;
-
-    manifestEffects =
-      lib.mapAttrs (_: effect: {
-        inherit (effect) on ignoreFailure;
-        exec =
-          if lib.isFunction effect.exec
-          then let
-            facet =
-              if effect.on == []
-              then ""
-              else builtins.head effect.on;
-          in {
-            inherit facet;
-            variants =
-              if builtins.hasAttr facet cfg.facet
-              then lib.mapAttrs (variant: _: renderArgv (effect.exec (context facet variant))) cfg.facet.${facet}.variants
-              else {};
-          }
-          else renderArgv effect.exec;
-      })
-      cfg.effect;
-
-    manifest = {
-      version = 4;
-      home = cfg.path.home;
-      facets =
-        lib.mapAttrs (facet: data: {
-          inherit (data) default;
-          variants = lib.mapAttrs (variant: _: toString variantRoots.${facet}.${variant}) data.variants;
-        })
-        cfg.facet;
-      files = builtins.listToAttrs (map (file: {
-          name = file.path;
-          value =
-            if lib.isFunction file.value
-            then {facet = file.facet;}
-            else if builtins.isString file.value
-            then toString (pkgs.writeText (lib.strings.sanitizeDerivationName "seni-${file.path}") file.value)
-            else toString (materialize file.value);
-        })
-        files);
-      effects = manifestEffects;
-    };
-    manifestPath = pkgs.writeText "seni-manifest.json" (builtins.toJSON manifest);
-    wrapperEnvironment = {
-      XDG_CONFIG_HOME = cfg.path.config;
-      XDG_CACHE_HOME = cfg.path.cache;
-      XDG_DATA_HOME = cfg.path.data;
-      XDG_STATE_HOME = cfg.path.state;
-      SENI_MANIFEST = manifestPath;
-      SENI_STATE_DIR = cfg.stateDirectory;
-    };
-    wrappedCli = pkgs.symlinkJoin {
-      name = "seni";
-      paths = [(pkgs.callPackage ./package.nix {})];
-      nativeBuildInputs = [pkgs.makeWrapper];
-      postBuild = ''
-        wrapProgram "$out/bin/seni" ${lib.escapeShellArgs (lib.concatMap (name: ["--set" name (toString wrapperEnvironment.${name})]) (builtins.attrNames wrapperEnvironment))}
-      '';
-    };
-  in {
-    assertions = [
-      {
-        assertion = lib.all (directory:
-          lib.hasPrefix "/" directory
-          && directory != "/"
-          && lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.drop 1 (lib.splitString "/" directory)))
-        ((builtins.attrValues directories) ++ [cfg.stateDirectory]);
-        message = "Seni directories must be normalized absolute paths";
-      }
-      {
-        assertion = cfg.facet != {};
-        message = "seni.facet must define at least one facet";
-      }
-      {
-        assertion = lib.all (name: name != "" && name != "." && name != ".." && !lib.hasInfix "/" name) (builtins.attrNames cfg.facet);
-        message = "Seni facet names must be single path segments";
-      }
-      {
-        assertion = lib.all (facet: facet.variants != {} && builtins.hasAttr facet.default facet.variants && lib.all (variant: variant != "") (builtins.attrNames facet.variants)) (builtins.attrValues cfg.facet);
-        message = "Seni facets must have variants and a valid default";
-      }
-      {
-        assertion = lib.all (kind: cfg.file.${kind} == {} || roots.${kind} != null) fileKinds;
-        message = "Seni file directories must be within seni.path.home";
-      }
-      {
-        assertion = lib.all (file: file.valid) files;
-        message = "Seni file paths must be normalized relative paths";
-      }
-      {
-        assertion = lib.all (file: lib.isFunction file.value == (file.facet != null)) files;
-        message = "Seni function file values require a facet, and static values cannot set one";
-      }
-      {
-        assertion = lib.all (file: file.facet == null || builtins.hasAttr file.facet cfg.facet) files;
-        message = "Seni files must reference defined facets";
-      }
-      {
-        assertion = lib.all (matches: lib.length matches == 1) (builtins.attrValues filesByPath);
-        message = "Seni file destinations must be unique";
-      }
-      {
-        assertion =
-          !lib.any (path: let
-            segments = lib.splitString "/" path;
-          in
-            lib.any (count: builtins.hasAttr (lib.concatStringsSep "/" (lib.take count segments)) filesByPath) (lib.range 1 (lib.length segments - 1)))
-          managedPaths;
-        message = "Seni file destinations cannot contain one another";
-      }
-      {
-        assertion = lib.all (name: let
-          effect = cfg.effect.${name};
-        in
-          name
-          != ""
-          && lib.all (facet: builtins.hasAttr facet cfg.facet) effect.on
-          && (!lib.isFunction effect.exec || lib.length effect.on == 1))
-        (builtins.attrNames cfg.effect);
-        message = "Seni effects must reference defined facets, and function effects require exactly one facet";
-      }
-      {
-        assertion = lib.all (effect:
-          if builtins.isList effect.exec
-          then effect.exec != [] && lib.hasPrefix "/" (builtins.head effect.exec)
-          else lib.all (argv: argv != [] && lib.hasPrefix "/" (builtins.head argv)) (builtins.attrValues effect.exec.variants))
-        (builtins.attrValues manifestEffects);
-        message = "Seni effect commands must have an absolute executable";
-      }
-    ];
-
-    environment.systemPackages = [wrappedCli];
-
-    seni = {
-      generated.manifest = manifestPath;
-      package = wrappedCli;
-    };
-  });
+    seni.generated.activation = activation;
+  };
 }

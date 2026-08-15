@@ -10,14 +10,14 @@ def assert-true [condition: bool message: string] {
   }
 }
 
-def main [manifest_path: string source_path: string] {
+def main [manifest_path: string source_path: string expected_home: string expected_default: string] {
   let manifest = open $manifest_path
   let raw_manifest = open --raw $manifest_path
 
   assert-equal $manifest.version 4 "manifest version"
-  assert-equal $manifest.home "/home/tester" "manifest home"
+  assert-equal $manifest.home $expected_home "manifest home"
   assert-equal ($manifest.facets | columns) [theme] "manifest facets"
-  assert-equal $manifest.facets.theme.default "light" "facet default"
+  assert-equal $manifest.facets.theme.default $expected_default "facet default"
   assert-equal ($manifest.facets.theme.variants | columns | sort) [dark light] "facet variants"
 
   assert-equal ($manifest.files | columns | sort) [
@@ -25,6 +25,7 @@ def main [manifest_path: string source_path: string] {
     ".config/demo/dynamic.txt"
     ".config/demo/static-source.nu"
     ".config/demo/static.txt"
+    "extra.txt"
   ] "managed files"
   assert-equal $manifest.files.".config/demo/dynamic-source.nu" {facet: theme} "dynamic source"
   assert-equal $manifest.files.".config/demo/dynamic.txt" {facet: theme} "dynamic text"
