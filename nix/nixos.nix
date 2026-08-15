@@ -2,7 +2,9 @@
   config,
   lib,
   ...
-}: {
+}: let
+  cfg = config.seni;
+in {
   imports = [
     (import ./module.nix {
       userModule = {
@@ -27,7 +29,7 @@
     })
   ];
 
-  config = lib.mkIf (config.seni.users != {}) {
+  config = lib.mkIf (cfg.users != {}) {
     systemd.services = lib.mapAttrs' (name: user:
       lib.nameValuePair "seni-${name}" {
         description = "Activate Seni for ${name}";
@@ -35,12 +37,12 @@
         wantedBy = ["multi-user.target"];
         unitConfig.RequiresMountsFor = [user.path.home user.path.state];
         serviceConfig = {
-          ExecStart = config.seni.generated.activation;
+          ExecStart = cfg.generated.activation;
           RemainAfterExit = true;
           Type = "oneshot";
           User = name;
         };
       })
-    config.seni.users;
+    cfg.users;
   };
 }

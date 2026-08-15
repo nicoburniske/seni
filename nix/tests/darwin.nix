@@ -57,7 +57,7 @@
 in
   assert lib.assertMsg (failedAssertions == []) (lib.concatMapStringsSep "; " (entry: entry.message) failedAssertions);
   assert lib.assertMsg (builtins.hasAttr "seni-activate" cfg.launchd.agents && !builtins.hasAttr "seni-activate" cfg.launchd.user.agents) "Seni's global LaunchAgent was not installed";
-  assert lib.assertMsg (agent.Label == "org.seni.activate" && agent.RunAtLoad && toString agent.Program == toString cfg.seni.generated.activation) "Seni's global LaunchAgent is invalid";
+  assert lib.assertMsg (agent.Label == "org.seni.activate" && agent.RunAtLoad && agent.Program == toString cfg.seni.generated.activation) "Seni's global LaunchAgent is invalid";
   assert lib.assertMsg (cfg.system.primaryUser == null && cfg.system.requiresPrimaryUser == []) "Seni unexpectedly requires a primary user";
   assert lib.assertMsg (map lib.getName alicePackages == ["hello" "seni"] && map lib.getName bobPackages == ["seni"] && toString aliceCli != toString bobCli) "Seni's user commands were not installed separately";
   assert lib.assertMsg (cfg.users.users.carol.packages == []) "Carol's disabled Seni packages were installed";

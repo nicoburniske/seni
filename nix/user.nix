@@ -6,56 +6,62 @@
   ...
 }: let
   cfg = config;
+  inherit (lib) mkOption types;
+
   fileKinds = ["home" "config" "cache" "data" "state"];
+  home = cfg.path.home;
 
-  valueType = lib.types.oneOf [lib.types.str lib.types.path];
-  argvType = lib.types.listOf valueType;
+  valueType = types.oneOf [types.str types.path];
+  argvType = types.listOf valueType;
 
-  facetOptionType = lib.types.submodule {
+  validSegment = segment: segment != "" && segment != "." && segment != "..";
+  validCommand = argv: argv != [] && lib.hasPrefix "/" (builtins.head argv);
+
+  facetOptionType = types.submodule {
     options = {
-      default = lib.mkOption {
-        type = lib.types.str;
+      default = mkOption {
+        type = types.str;
         description = "default variant";
       };
 
-      variants = lib.mkOption {
-        type = lib.types.attrsOf lib.types.anything;
+      variants = mkOption {
+        type = types.attrsOf types.anything;
         default = {};
         description = "variant payloads";
       };
     };
   };
 
-  fileOptionType = lib.types.submodule {
+  fileOptionType = types.submodule {
     options = {
-      facet = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+      facet = mkOption {
+        type = types.nullOr types.str;
         default = null;
         description = "facet used to generate this file";
       };
 
-      value = lib.mkOption {
-        type = lib.types.oneOf [valueType (lib.types.functionTo valueType)];
+      value = mkOption {
+        type = types.oneOf [valueType (types.functionTo valueType)];
         description = "file contents or source";
       };
     };
   };
 
-  effectOptionType = lib.types.submodule {
+  effectOptionType = types.submodule {
     options = {
-      on = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
+      on = mkOption {
+        type = types.listOf types.str;
         default = [];
         description = "facets that trigger this effect during a switch";
       };
 
-      exec = lib.mkOption {
-        type = lib.types.oneOf [argvType (lib.types.functionTo argvType)];
+      exec = mkOption {
+        type = types.oneOf [argvType (types.functionTo argvType)];
         description = "effect argv";
       };
 
-      ignoreFailure = lib.mkOption {
-        type = lib.types.bool;
+      ignoreFailure = mkOption {
+        type = types.bool;
         default = false;
         description = "whether to ignore a nonzero exit status";
       };
@@ -82,10 +88,10 @@
 
   directories = cfg.path;
   roots = lib.mapAttrs (_: directory:
-    if directory == cfg.path.home
+    if directory == home
     then ""
-    else if lib.hasPrefix "${cfg.path.home}/" directory
-    then lib.removePrefix "${cfg.path.home}/" directory
+    else if lib.hasPrefix "${home}/" directory
+    then lib.removePrefix "${home}/" directory
     else null)
   directories;
 
@@ -95,14 +101,17 @@
         if roots.${kind} == null || roots.${kind} == ""
         then path
         else "${roots.${kind}}/${path}";
-      valid = lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.splitString "/" path);
+      valid = lib.all validSegment (lib.splitString "/" path);
       inherit (file) facet value;
     })
     cfg.file.${kind})
   fileKinds;
   filesByPath = lib.groupBy (file: file.path) files;
   managedPaths = builtins.attrNames filesByPath;
-  dynamicFilesByFacet = lib.groupBy (file: file.facet) (lib.filter (file: lib.isFunction file.value && file.facet != null) files);
+  dynamicFilesByFacet = lib.pipe files [
+    (lib.filter (file: lib.isFunction file.value && file.facet != null))
+    (lib.groupBy (file: file.facet))
+  ];
 
   resolvedFacets = materialize cfg.facet;
   context = facet: variant: {
@@ -138,10 +147,12 @@
   cfg.facet;
 
   manifestEffects =
-    lib.mapAttrs (_: effect: {
+    lib.mapAttrs (_: effect: let
+      exec = effect.exec;
+    in {
       inherit (effect) on ignoreFailure;
       exec =
-        if lib.isFunction effect.exec
+        if lib.isFunction exec
         then let
           facet =
             if effect.on == []
@@ -151,23 +162,24 @@
           inherit facet;
           variants =
             if builtins.hasAttr facet cfg.facet
-            then lib.mapAttrs (variant: _: renderArgv (effect.exec (context facet variant))) cfg.facet.${facet}.variants
+            then lib.mapAttrs (variant: _: renderArgv (exec (context facet variant))) cfg.facet.${facet}.variants
             else {};
         }
-        else renderArgv effect.exec;
+        else renderArgv exec;
     })
     cfg.effect;
 
   manifest = {
     version = 4;
-    home = cfg.path.home;
+    inherit home;
     facets =
       lib.mapAttrs (facet: data: {
         inherit (data) default;
         variants = lib.mapAttrs (variant: _: toString variantRoots.${facet}.${variant}) data.variants;
       })
       cfg.facet;
-    files = builtins.listToAttrs (map (file: {
+    files = lib.pipe files [
+      (map (file: {
         name = file.path;
         value =
           if lib.isFunction file.value
@@ -175,8 +187,9 @@
           else if builtins.isString file.value
           then toString (pkgs.writeText (lib.strings.sanitizeDerivationName "seni-${name}-${file.path}") file.value)
           else toString (materialize file.value);
-      })
-      files);
+      }))
+      builtins.listToAttrs
+    ];
     effects = manifestEffects;
   };
 in {
@@ -185,71 +198,71 @@ in {
   imports = [(pkgs.path + "/nixos/modules/misc/assertions.nix")];
 
   options = {
-    enable = lib.mkOption {
-      type = lib.types.bool;
+    enable = mkOption {
+      type = types.bool;
       default = true;
       description = "whether to manage this user's Seni configuration";
     };
 
-    facet = lib.mkOption {
-      type = lib.types.attrsOf facetOptionType;
+    facet = mkOption {
+      type = types.attrsOf facetOptionType;
       default = {};
       description = "facets keyed by name";
     };
 
     file = lib.genAttrs fileKinds (kind:
-      lib.mkOption {
-        type = lib.types.attrsOf fileOptionType;
+      mkOption {
+        type = types.attrsOf fileOptionType;
         default = {};
         description = "files in the ${kind} directory";
       });
 
-    effect = lib.mkOption {
-      type = lib.types.attrsOf effectOptionType;
+    effect = mkOption {
+      type = types.attrsOf effectOptionType;
       default = {};
       description = "effects keyed by name";
     };
 
-    packages = lib.mkOption {
-      type = lib.types.listOf lib.types.package;
+    packages = mkOption {
+      type = types.listOf types.package;
       default = [];
       description = "packages installed for this user";
     };
 
     path = {
-      home = lib.mkOption {
-        type = lib.types.str;
+      home = mkOption {
+        type = types.str;
         readOnly = true;
         description = "home directory managed by Seni";
       };
 
-      config = lib.mkOption {
-        type = lib.types.str;
-        default = "${cfg.path.home}/.config";
+      config = mkOption {
+        type = types.str;
+        default = "${home}/.config";
         description = "XDG config directory";
       };
 
-      cache = lib.mkOption {
-        type = lib.types.str;
-        default = "${cfg.path.home}/.cache";
+      cache = mkOption {
+        type = types.str;
+        default = "${home}/.cache";
         description = "XDG cache directory";
       };
 
-      data = lib.mkOption {
-        type = lib.types.str;
-        default = "${cfg.path.home}/.local/share";
+      data = mkOption {
+        type = types.str;
+        default = "${home}/.local/share";
         description = "XDG data directory";
       };
 
-      state = lib.mkOption {
-        type = lib.types.str;
-        default = "${cfg.path.home}/.local/state";
+      state = mkOption {
+        type = types.str;
+        default = "${home}/.local/state";
         description = "XDG state directory";
       };
     };
 
-    generated.manifest = lib.mkOption {
-      type = lib.types.path;
+    generated.manifest = mkOption {
+      type = types.path;
       readOnly = true;
       internal = true;
     };
@@ -261,7 +274,7 @@ in {
         assertion = lib.all (directory:
           lib.hasPrefix "/" directory
           && directory != "/"
-          && lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.drop 1 (lib.splitString "/" directory)))
+          && lib.all validSegment (lib.drop 1 (lib.splitString "/" directory)))
         (builtins.attrValues directories);
         message = "directories must be normalized absolute paths";
       }
@@ -270,7 +283,7 @@ in {
         message = "facet must define at least one facet";
       }
       {
-        assertion = lib.all (facet: facet != "" && facet != "." && facet != ".." && !lib.hasInfix "/" facet) (builtins.attrNames cfg.facet);
+        assertion = lib.all (facet: validSegment facet && !lib.hasInfix "/" facet) (builtins.attrNames cfg.facet);
         message = "facet names must be single path segments";
       }
       {
@@ -318,10 +331,12 @@ in {
         message = "effects must reference defined facets, and function effects require exactly one facet";
       }
       {
-        assertion = lib.all (effect:
-          if builtins.isList effect.exec
-          then effect.exec != [] && lib.hasPrefix "/" (builtins.head effect.exec)
-          else lib.all (argv: argv != [] && lib.hasPrefix "/" (builtins.head argv)) (builtins.attrValues effect.exec.variants))
+        assertion = lib.all (effect: let
+          exec = effect.exec;
+        in
+          if builtins.isList exec
+          then validCommand exec
+          else lib.all validCommand (builtins.attrValues exec.variants))
         (builtins.attrValues manifestEffects);
         message = "effect commands must have an absolute executable";
       }

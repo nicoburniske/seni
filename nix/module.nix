@@ -6,7 +6,9 @@
   ...
 }: let
   cfg = config.seni;
-  userType = lib.types.submoduleWith {
+  inherit (lib) mkOption types;
+
+  userType = types.submoduleWith {
     description = "Seni user configuration";
     class = "seni";
     specialArgs =
@@ -38,26 +40,24 @@
   activation = pkgs.writeShellScript "seni-activate" ''
     user="$(${pkgs.coreutils}/bin/id -un)"
     case "$user" in
-      ${lib.concatMapAttrsStringSep "\n" (name: user:
-      if user.enable
-      then ''
+      ${lib.concatMapAttrsStringSep "\n" (name: user: let
+        command =
+          if user.enable
+          then "${userPackages.${name}}/bin/seni activate"
+          else "${cfg.cli.package}/bin/seni --state-dir ${lib.escapeShellArg stateDirectories.${name}} deactivate";
+      in ''
         ${lib.escapeShellArg name})
-          exec ${userPackages.${name}}/bin/seni activate
-          ;;
-      ''
-      else ''
-        ${lib.escapeShellArg name})
-          exec ${cfg.cli.package}/bin/seni --state-dir ${lib.escapeShellArg stateDirectories.${name}} deactivate
+          exec ${command}
           ;;
       '')
-    cfg.users}
+      cfg.users}
       *) exit 0 ;;
     esac
   '';
 in {
   options.seni = {
-    users = lib.mkOption {
-      type = lib.types.attrsWith {
+    users = mkOption {
+      type = types.attrsWith {
         elemType = userType;
         placeholder = "username";
       };
@@ -65,27 +65,27 @@ in {
       description = "Seni user configurations";
     };
 
-    extraModules = lib.mkOption {
-      type = lib.types.listOf lib.types.deferredModule;
+    extraModules = mkOption {
+      type = types.listOf types.deferredModule;
       default = [];
       description = "modules evaluated in every Seni user configuration";
     };
 
-    specialArgs = lib.mkOption {
-      type = lib.types.attrs;
+    specialArgs = mkOption {
+      type = types.attrs;
       default = {};
       description = "arguments passed to every Seni user module";
     };
 
-    cli.package = lib.mkOption {
-      type = lib.types.package;
+    cli.package = mkOption {
+      type = types.package;
       default = pkgs.callPackage ./package.nix {};
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix {}";
       description = "unconfigured Seni CLI package";
     };
 
-    generated.activation = lib.mkOption {
-      type = lib.types.path;
+    generated.activation = mkOption {
+      type = types.path;
       readOnly = true;
       internal = true;
     };
@@ -99,14 +99,16 @@ in {
           message = "seni.specialArgs.name is reserved";
         }
       ]
-      ++ lib.concatLists (lib.mapAttrsToList (name: user:
-        map (assertion:
-          assertion
-          // {
-            message = "Seni user '${name}': ${assertion.message}";
-          })
-        user.assertions)
-      cfg.users)
+      ++ lib.pipe cfg.users [
+        (lib.mapAttrsToList (name: user:
+          map (assertion:
+            assertion
+            // {
+              message = "Seni user '${name}': ${assertion.message}";
+            })
+          user.assertions))
+        lib.concatLists
+      ]
       ++ [
         {
           assertion = lib.allUnique (map (user: user.path.home) users);
@@ -118,7 +120,11 @@ in {
         }
       ];
 
-    warnings = lib.concatLists (lib.mapAttrsToList (name: user: map (warning: "Seni user '${name}': ${warning}") user.warnings) cfg.users);
+    warnings = lib.pipe cfg.users [
+      (lib.mapAttrsToList (name: user:
+          map (warning: "Seni user '${name}': ${warning}") user.warnings))
+      lib.concatLists
+    ];
 
     users.users =
       lib.mapAttrs (name: user: {

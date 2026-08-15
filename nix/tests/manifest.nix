@@ -63,6 +63,6 @@
 in
   assert lib.assertMsg (failedAssertions == []) (lib.concatMapStringsSep "; " (entry: entry.message) failedAssertions);
     pkgs.runCommand "seni-manifest-test" {} ''
-      ${pkgs.nushell}/bin/nu ${./manifest.nu} ${lib.escapeShellArg (toString manifest)} ${lib.escapeShellArg (toString fixture)} /home/alice light
+      ${pkgs.nushell}/bin/nu ${fixture} ${lib.escapeShellArg (toString manifest)} ${lib.escapeShellArg (toString fixture)} /home/alice light
       touch "$out"
     ''

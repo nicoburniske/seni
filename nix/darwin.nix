@@ -3,7 +3,9 @@
   lib,
   pkgs,
   ...
-}: {
+}: let
+  cfg = config.seni;
+in {
   imports = [
     (import ./module.nix {
       userModule = {
@@ -28,25 +30,27 @@
     })
   ];
 
-  config = lib.mkIf (config.seni.users != {}) {
+  config = lib.mkIf (cfg.users != {}) {
     launchd.agents.seni-activate.serviceConfig = {
       Label = "org.seni.activate";
-      Program = config.seni.generated.activation;
+      Program = toString cfg.generated.activation;
       RunAtLoad = true;
     };
 
     system.activationScripts.postActivation.text = lib.mkAfter (
-      lib.concatMapAttrsStringSep "\n" (name: user:
+      lib.concatMapAttrsStringSep "\n" (name: user: let
+        escapedName = lib.escapeShellArg name;
+      in
         if user.enable
         then ''
-          if uid="$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg name} 2>/dev/null)"; then
+          if uid="$(${pkgs.coreutils}/bin/id -u ${escapedName} 2>/dev/null)"; then
             /bin/launchctl kickstart -k "gui/$uid/org.seni.activate" 2>/dev/null || true
           fi
         ''
         else ''
-          /usr/bin/sudo --user=${lib.escapeShellArg name} -- ${config.seni.generated.activation}
+          /usr/bin/sudo --user=${escapedName} -- ${cfg.generated.activation}
         '')
-      config.seni.users
+      cfg.users
     );
   };
 }
