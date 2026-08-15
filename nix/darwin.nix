@@ -36,11 +36,16 @@
     };
 
     system.activationScripts.postActivation.text = lib.mkAfter (
-      lib.concatMapAttrsStringSep "\n" (name: _: ''
-        if uid="$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg name} 2>/dev/null)"; then
-          /bin/launchctl kickstart -k "gui/$uid/org.seni.activate" 2>/dev/null || true
-        fi
-      '')
+      lib.concatMapAttrsStringSep "\n" (name: user:
+        if user.enable
+        then ''
+          if uid="$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg name} 2>/dev/null)"; then
+            /bin/launchctl kickstart -k "gui/$uid/org.seni.activate" 2>/dev/null || true
+          fi
+        ''
+        else ''
+          /usr/bin/sudo --user=${lib.escapeShellArg name} -- ${config.seni.generated.activation}
+        '')
       config.seni.users
     );
   };

@@ -62,7 +62,8 @@ in
   assert lib.assertMsg (map lib.getName alicePackages == ["hello" "seni"] && map lib.getName bobPackages == ["seni"] && toString aliceCli != toString bobCli) "Seni's user commands were not installed separately";
   assert lib.assertMsg (cfg.users.users.carol.packages == []) "Carol's disabled Seni packages were installed";
   assert lib.assertMsg (cfg.seni.users.alice.path.home == "/Users/alice" && cfg.seni.users.bob.path.home == "/Users/bob") "Seni's home directories were not derived from nix-darwin";
-  assert lib.assertMsg (lib.hasInfix "alice" postActivation && lib.hasInfix "bob" postActivation && lib.hasInfix "carol" postActivation) "Seni's LaunchAgents are not restarted for every configured user";
+  assert lib.assertMsg (lib.hasInfix "alice" postActivation && lib.hasInfix "bob" postActivation && lib.hasInfix "launchctl kickstart" postActivation) "Seni's enabled users are not activated after rebuilds";
+  assert lib.assertMsg (lib.hasInfix "/usr/bin/sudo --user=carol -- " postActivation) "Seni's disabled users are not deactivated after rebuilds";
     pkgs.runCommand "seni-darwin-module-test" {} ''
       touch "$out"
     ''
