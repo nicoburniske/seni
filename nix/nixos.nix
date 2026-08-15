@@ -1,47 +1,33 @@
 {
   config,
   lib,
-  options,
-  pkgs,
   ...
-}: let
-  cfg = config.seni;
-  osConfig = config;
+}: {
+  imports = [
+    (import ./module.nix {
+      userModule = {
+        name,
+        osConfig,
+        ...
+      }: let
+        user = osConfig.users.users.${name} or null;
+      in {
+        path.home =
+          if user == null
+          then "/var/empty"
+          else user.home;
 
-  userType = lib.types.submoduleWith {
-    description = "Seni user configuration";
-    class = "seni";
-    specialArgs =
-      builtins.removeAttrs cfg.specialArgs ["name"]
-      // {
-        inherit osConfig pkgs;
-        osOptions = options;
+        assertions = [
+          {
+            assertion = user != null && user.enable && user.isNormalUser && user.name == name;
+            message = "must reference an enabled normal NixOS user whose name matches the profile key";
+          }
+        ];
       };
-    modules =
-      [
-        ./user.nix
-        ({name, ...}: let
-          user = osConfig.users.users.${name} or null;
-        in {
-          path.home =
-            if user == null
-            then "/var/empty"
-            else user.home;
+    })
+  ];
 
-          assertions = [
-            {
-              assertion = user != null && user.enable && user.isNormalUser && user.name == name;
-              message = "must reference an enabled normal NixOS user whose name matches the profile key";
-            }
-          ];
-        })
-      ]
-      ++ cfg.extraModules;
-  };
-in {
-  imports = [(import ./module.nix {inherit userType;})];
-
-  config = lib.mkIf (cfg.users != {}) {
+  config = lib.mkIf (config.seni.users != {}) {
     systemd.services = lib.mapAttrs' (name: user:
       lib.nameValuePair "seni-${name}" {
         description = "Activate Seni for ${name}";
@@ -49,12 +35,12 @@ in {
         wantedBy = ["multi-user.target"];
         unitConfig.RequiresMountsFor = [user.path.home user.path.state];
         serviceConfig = {
-          ExecStart = cfg.generated.activation;
+          ExecStart = config.seni.generated.activation;
           RemainAfterExit = true;
           Type = "oneshot";
           User = name;
         };
       })
-    cfg.users;
+    config.seni.users;
   };
 }

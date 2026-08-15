@@ -1,10 +1,23 @@
-{userType}: {
+{userModule}: {
   config,
   lib,
+  options,
   pkgs,
   ...
 }: let
   cfg = config.seni;
+  userType = lib.types.submoduleWith {
+    description = "Seni user configuration";
+    class = "seni";
+    specialArgs =
+      builtins.removeAttrs cfg.specialArgs ["name"]
+      // {
+        inherit pkgs;
+        osConfig = config;
+        osOptions = options;
+      };
+    modules = [./user.nix userModule] ++ cfg.extraModules;
+  };
   enabledUsers = lib.filterAttrs (_: user: user.enable) cfg.users;
   users = builtins.attrValues cfg.users;
   stateDirectories = lib.mapAttrs (_: user: "${user.path.state}/seni") cfg.users;

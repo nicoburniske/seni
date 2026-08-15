@@ -35,7 +35,7 @@
         manifest = pkgs.callPackage ./nix/tests/manifest.nix {};
       }
       // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        multi-user = pkgs.callPackage ./nix/tests/multi-user.nix {};
+        nixos = pkgs.callPackage ./nix/tests/nixos.nix {};
       });
 
     devShells = forAllSystems (system: let

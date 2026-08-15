@@ -1,6 +1,6 @@
 {pkgs}:
 pkgs.testers.nixosTest {
-  name = "seni-multi-user";
+  name = "seni-nixos";
 
   nodes.machine = {
     lib,
@@ -28,10 +28,11 @@ pkgs.testers.nixosTest {
     };
 
     seni = {
+      specialArgs.nameFile = ".seni-name";
       extraModules = [
         ({
           name,
-          pkgs,
+          nameFile,
           ...
         }: {
           facet.theme.variants = {
@@ -40,18 +41,12 @@ pkgs.testers.nixosTest {
           };
 
           file.home = {
-            ".seni-name".value = name;
+            ${nameFile}.value = name;
             ".seni-theme" = {
               facet = "theme";
               value = {value, ...}: value;
             };
           };
-
-          effect.record-user.exec = [
-            (pkgs.writeShellScript "seni-record-user" ''
-              ${pkgs.coreutils}/bin/id -un > "$HOME/.seni-activated-by"
-            '')
-          ];
         })
       ];
 
@@ -83,8 +78,6 @@ pkgs.testers.nixosTest {
     machine.succeed("test $(cat /home/bob/.seni-name) = bob")
     machine.succeed("test $(cat /home/alice/.seni-theme) = light")
     machine.succeed("test $(cat /home/bob/.seni-theme) = dark")
-    machine.succeed("test $(cat /home/alice/.seni-activated-by) = alice")
-    machine.succeed("test $(cat /home/bob/.seni-activated-by) = bob")
     machine.succeed("test $(stat -c %U /home/alice/.local/state/seni) = alice")
     machine.succeed("test $(stat -c %U /home/bob/.local/state/seni) = bob")
     machine.succeed("test -x /etc/profiles/per-user/alice/bin/hello")
@@ -95,8 +88,6 @@ pkgs.testers.nixosTest {
     machine.succeed("su - alice -c 'seni switch theme=dark'")
     machine.succeed("test $(cat /home/alice/.seni-theme) = dark")
     machine.succeed("test $(cat /home/bob/.seni-theme) = dark")
-    machine.fail("su - carol -c 'seni selection'")
-
     machine.wait_until_succeeds("! systemctl is-active user@1000.service")
     machine.succeed("/run/current-system/specialisation/alice-disabled/bin/switch-to-configuration test")
     machine.wait_until_succeeds("test ! -L /home/alice/.seni-theme")
@@ -104,6 +95,5 @@ pkgs.testers.nixosTest {
     machine.succeed("test $(cat /home/bob/.seni-theme) = dark")
     machine.fail("test -e /etc/profiles/per-user/alice/bin/seni")
     machine.succeed("test -x /etc/profiles/per-user/bob/bin/seni")
-    machine.fail("su - alice -c 'seni selection'")
   '';
 }

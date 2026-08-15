@@ -52,21 +52,16 @@
   bobPackages = cfg.users.users.bob.packages;
   aliceCli = lib.last alicePackages;
   bobCli = lib.last bobPackages;
+  agent = cfg.launchd.agents.seni-activate.serviceConfig;
   postActivation = cfg.system.activationScripts.postActivation.text;
 in
   assert lib.assertMsg (failedAssertions == []) (lib.concatMapStringsSep "; " (entry: entry.message) failedAssertions);
-  assert lib.assertMsg (builtins.hasAttr "seni-activate" cfg.launchd.agents) "Seni's system LaunchAgent was not installed";
-  assert lib.assertMsg (!builtins.hasAttr "seni-activate" cfg.launchd.user.agents) "Seni's LaunchAgent requires a primary user";
-  assert lib.assertMsg (builtins.hasAttr "org.seni.activate.plist" cfg.environment.launchAgents) "Seni's system LaunchAgent was not materialized";
-  assert lib.assertMsg (cfg.launchd.agents.seni-activate.serviceConfig.Label == "org.seni.activate" && cfg.launchd.agents.seni-activate.serviceConfig.RunAtLoad) "Seni's system LaunchAgent is invalid";
-  assert lib.assertMsg (toString cfg.launchd.agents.seni-activate.serviceConfig.Program == toString cfg.seni.generated.activation) "Seni's system LaunchAgent uses the wrong activation command";
+  assert lib.assertMsg (builtins.hasAttr "seni-activate" cfg.launchd.agents && !builtins.hasAttr "seni-activate" cfg.launchd.user.agents) "Seni's global LaunchAgent was not installed";
+  assert lib.assertMsg (agent.Label == "org.seni.activate" && agent.RunAtLoad && toString agent.Program == toString cfg.seni.generated.activation) "Seni's global LaunchAgent is invalid";
   assert lib.assertMsg (cfg.system.primaryUser == null && cfg.system.requiresPrimaryUser == []) "Seni unexpectedly requires a primary user";
-  assert lib.assertMsg (map lib.getName alicePackages == ["hello" "seni"]) "Alice's Seni packages were not installed";
-  assert lib.assertMsg (map lib.getName bobPackages == ["seni"]) "Bob's Seni command was not installed";
+  assert lib.assertMsg (map lib.getName alicePackages == ["hello" "seni"] && map lib.getName bobPackages == ["seni"] && toString aliceCli != toString bobCli) "Seni's user commands were not installed separately";
   assert lib.assertMsg (cfg.users.users.carol.packages == []) "Carol's disabled Seni packages were installed";
-  assert lib.assertMsg (toString aliceCli != toString bobCli) "Seni users share a configured command";
-  assert lib.assertMsg (cfg.seni.users.alice.path.home == "/Users/alice") "Alice's home directory was not derived from nix-darwin";
-  assert lib.assertMsg (cfg.seni.users.bob.path.home == "/Users/bob") "Bob's home directory was not derived from nix-darwin";
+  assert lib.assertMsg (cfg.seni.users.alice.path.home == "/Users/alice" && cfg.seni.users.bob.path.home == "/Users/bob") "Seni's home directories were not derived from nix-darwin";
   assert lib.assertMsg (lib.hasInfix "alice" postActivation && lib.hasInfix "bob" postActivation && lib.hasInfix "carol" postActivation) "Seni's LaunchAgents are not restarted for every configured user";
     pkgs.runCommand "seni-darwin-module-test" {} ''
       touch "$out"
