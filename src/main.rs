@@ -107,7 +107,7 @@ fn main() -> ExitCode {
                     if json {
                         print_json(&facet_json(facet, selection[facet_id]))?;
                     } else {
-                        let current = facet.variant(selection[facet_id]).0;
+                        let current = facet.variant(selection[facet_id]);
                         for variant in facet.variants.keys() {
                             let prefix = if variant.as_ref() == current {
                                 "*"
@@ -129,8 +129,8 @@ fn main() -> ExitCode {
                     for (facet_id, name, facet) in config.facets() {
                         println!(
                             "{name} current={} default={} variants={}",
-                            facet.variant(selection[facet_id]).0,
-                            facet.variant(facet.default).0,
+                            facet.variant(selection[facet_id]),
+                            facet.variant(facet.default),
                             facet.variants.len()
                         );
                     }
@@ -146,7 +146,7 @@ fn main() -> ExitCode {
                     })?;
                 } else {
                     for (facet_id, name, facet) in config.facets() {
-                        println!("{name}={}", facet.variant(selection[facet_id]).0);
+                        println!("{name}={}", facet.variant(selection[facet_id]));
                     }
                 }
             }
@@ -205,8 +205,8 @@ fn print_json(value: &impl Serialize) -> crate::Result<()> {
 
 fn facet_json(facet: &Facet, current: VariantId) -> Value {
     json!({
-        "current": facet.variant(current).0,
-        "default": facet.variant(facet.default).0,
+        "current": facet.variant(current),
+        "default": facet.variant(facet.default),
         "variants": facet.variants.keys().collect::<Vec<_>>(),
     })
 }

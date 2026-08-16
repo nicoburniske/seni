@@ -38,7 +38,7 @@ pub fn activate(
             }
 
             let target = previous.home.join(path.as_ref());
-            let managed = managed_source(previous, state_dir, path, source);
+            let managed = managed_source(state_dir, path, source);
             if path_points_to(&target, &managed)? {
                 fs::remove_file(&target)
                     .context(format_args!("remove stale link '{}'", target.display()))?;
@@ -52,7 +52,7 @@ pub fn activate(
 
     for (path, configured_source) in &config.files {
         let target = config.home.join(path.as_ref());
-        let source = managed_source(config, state_dir, path, configured_source);
+        let source = managed_source(state_dir, path, configured_source);
         // managed targets are normally symlinks, so read them before falling back to metadata
         let (actual, metadata) = match fs::read_link(&target) {
             Ok(actual) => (Some(actual), None),
@@ -72,7 +72,7 @@ pub fn activate(
 
         let owned = previous.is_some_and(|previous| {
             previous.files.get(path.as_ref()).is_some_and(|source| {
-                let managed = managed_source(previous, state_dir, path, source);
+                let managed = managed_source(state_dir, path, source);
                 actual.as_deref() == Some(&managed)
             })
         });
@@ -167,7 +167,7 @@ pub fn deactivate(state_dir: &Path) -> crate::Result<Deactivation> {
                 continue;
             }
         };
-        if actual != managed_source(&config, state_dir, path, source) {
+        if actual != managed_source(state_dir, path, source) {
             summary.changed += 1;
             continue;
         }
@@ -237,18 +237,13 @@ pub fn current_selection(config: &Config, state_dir: &Path) -> crate::Result<Sel
     }
 }
 
-fn managed_source<'a>(
-    config: &'a Config,
-    state_dir: &Path,
-    path: &'a str,
-    source: &'a Source,
-) -> Cow<'a, Path> {
+fn managed_source<'a>(state_dir: &Path, path: &'a str, source: &'a Source) -> Cow<'a, Path> {
     match source {
         Source::Static(source) => Cow::Borrowed(source),
-        Source::Facet(facet_id) => Cow::Owned(
+        Source::Root(root_id) => Cow::Owned(
             state_dir
                 .join("current/root")
-                .join(config.facet_name(*facet_id))
+                .join(root_id.index().to_string())
                 .join(path),
         ),
     }
@@ -463,11 +458,10 @@ impl<'a> LockedState<'a> {
                 selection_path.display()
             ))?;
 
-        for (facet_id, name, facet) in config.facets() {
-            let variant = facet.variant(selection[facet_id]).1;
-            let link = root_dir.join(name);
-            symlink(&variant.root, &link)
-                .context(format_args!("link variant '{}'", link.display()))?;
+        for (root_id, _) in config.roots() {
+            let link = root_dir.join(root_id.index().to_string());
+            symlink(config.root_variant(root_id, selection), &link)
+                .context(format_args!("link root '{}'", link.display()))?;
         }
 
         Ok(pending)
@@ -520,8 +514,9 @@ impl Drop for PendingState {
 mod tests {
     use super::*;
     use crate::manifest::{Argv, Effect, EffectExec};
-    use serde_json::{json, Map, Value};
+    use serde_json::{json, Value};
     use std::fs;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
@@ -542,39 +537,30 @@ mod tests {
         }
     }
 
-    fn manifest(temp: &Path, name: &str, multiple: bool, files: Value) -> (Config, PathBuf) {
+    fn manifest(temp: &Path, name: &str, files: Value) -> (Config, PathBuf) {
         let dark = temp.join("dark");
         let light = temp.join("light");
         fs::create_dir_all(&dark).unwrap();
         fs::create_dir_all(&light).unwrap();
 
-        let mut facets = Map::new();
-        facets.insert(
-            "theme".to_string(),
-            json!({
-                "default": "dark",
-                "variants": {"dark": dark, "light": light}
-            }),
-        );
-        if multiple {
-            let compact = temp.join("compact");
-            let roomy = temp.join("roomy");
-            fs::create_dir_all(&compact).unwrap();
-            fs::create_dir_all(&roomy).unwrap();
-            facets.insert(
-                "density".to_string(),
-                json!({
-                    "default": "compact",
-                    "variants": {"compact": compact, "roomy": roomy}
-                }),
-            );
-        }
-
         let encoded = serde_json::to_vec(&json!({
             "version": 1,
             "home": temp,
             "existingFileStrategy": "fail",
-            "facets": Value::Object(facets),
+            "facets": {
+                "theme": {
+                    "default": "dark",
+                    "variants": ["dark", "light"]
+                },
+                "density": {
+                    "default": "compact",
+                    "variants": ["compact", "roomy"]
+                }
+            },
+            "roots": [{
+                "facets": ["theme"],
+                "variants": [dark, light]
+            }],
             "files": files
         }))
         .unwrap();
@@ -584,20 +570,9 @@ mod tests {
         (config, manifest_path)
     }
 
-    fn fixture(temp: &Path, multiple: bool) -> (Config, PathBuf, PathBuf) {
-        let (config, manifest_path) = manifest(temp, "manifest.json", multiple, json!({}));
-        (config, manifest_path, temp.join("state"))
-    }
-
     fn selected(config: &Config, selection: &Selection, facet: &str, variant: &str) -> bool {
         let facet_id = config.facet_id(facet).unwrap();
         selection[facet_id] == config[facet_id].variant_id(variant).unwrap()
-    }
-
-    fn variant_root<'a>(config: &'a Config, facet: &str, variant: &str) -> &'a Path {
-        let facet_id = config.facet_id(facet).unwrap();
-        let variant_id = config[facet_id].variant_id(variant).unwrap();
-        &config[facet_id].variant(variant_id).1.root
     }
 
     fn script(temp: &Path, name: &str, body: &str) -> PathBuf {
@@ -650,7 +625,7 @@ mod tests {
             let source = temp.0.join(format!("{name}-source"));
             fs::write(&source, "managed").unwrap();
             let (mut config, manifest_path) =
-                manifest(&home, "manifest.json", false, json!({"target": source}));
+                manifest(&home, "manifest.json", json!({"target": source}));
             config.existing_file_strategy = strategy;
             let target = home.join("target");
             if strategy == ExistingFileStrategy::Clobber {
@@ -688,24 +663,60 @@ mod tests {
     }
 
     #[test]
-    fn switches_selections_between_state_directories() {
+    fn activates_and_switches_configuration() {
         let temp = TestDir::new("switch");
-        let (config, manifest_path, state) = fixture(&temp.0, true);
+        let roots = ["dark-compact", "dark-roomy", "light-compact", "light-roomy"].map(|name| {
+            let root = temp.0.join(name);
+            fs::create_dir_all(root.join(".config/app")).unwrap();
+            fs::write(root.join(".config/app/config"), name).unwrap();
+            root
+        });
+        let encoded = serde_json::to_vec(&json!({
+            "version": 1,
+            "home": temp.0,
+            "existingFileStrategy": "fail",
+            "facets": {
+                "theme": {
+                    "default": "dark",
+                    "variants": ["dark", "light"]
+                },
+                "density": {
+                    "default": "compact",
+                    "variants": ["compact", "roomy"]
+                }
+            },
+            "roots": [{
+                "facets": ["theme", "density"],
+                "variants": roots
+            }],
+            "files": {
+                ".config/app/config": {"root": 0}
+            }
+        }))
+        .unwrap();
+        let config = Config::parse(encoded.as_slice()).unwrap();
+        let manifest_path = temp.0.join("manifest.json");
+        fs::write(&manifest_path, encoded).unwrap();
+        let state = temp.0.join("state");
+        let target = temp.0.join(".config/app/config");
         let set = ["theme=light".to_string(), "density=roomy".to_string()];
 
         activate(&config, &manifest_path, &state).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "dark-compact");
+
         let selection = switch(&config, &manifest_path, &state, &set).unwrap();
         let first = fs::read_link(state.join("current")).unwrap();
 
         assert!(selected(&config, &selection, "theme", "light"));
         assert!(selected(&config, &selection, "density", "roomy"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "light-roomy");
         assert_eq!(
-            fs::read_link(state.join("current/root/theme")).unwrap(),
-            variant_root(&config, "theme", "light")
+            fs::read_link(state.join("current/root/0")).unwrap(),
+            roots[3]
         );
         assert_eq!(
-            fs::read_link(state.join("current/root/density")).unwrap(),
-            variant_root(&config, "density", "roomy")
+            fs::read_link(&target).unwrap(),
+            state.join("current/root/0/.config/app/config")
         );
         assert_eq!(
             fs::read_link(state.join("current/manifest")).unwrap(),
@@ -735,18 +746,13 @@ mod tests {
     #[test]
     fn failed_switch_preserves_current_and_removes_pending_state() {
         let temp = TestDir::new("failed-switch");
-        let (mut config, manifest_path, state) = fixture(&temp.0, false);
+        let (config, manifest_path) = manifest(&temp.0, "manifest.json", json!({}));
+        let state = temp.0.join("state");
         activate(&config, &manifest_path, &state).unwrap();
         let current = fs::read_link(state.join("current")).unwrap();
-        let (_, facet) = config.facets.shift_remove_index(0).unwrap();
-        config.facets.insert("missing/theme".into(), facet);
-        fs::write(
-            state.join("current/selection.json"),
-            r#"{"missing/theme":"dark"}"#,
-        )
-        .unwrap();
+        let invalid_manifest = Path::new(std::ffi::OsStr::from_bytes(b"/invalid\0"));
 
-        assert!(switch(&config, &manifest_path, &state, &[]).is_err());
+        assert!(switch(&config, invalid_manifest, &state, &[]).is_err());
 
         assert_eq!(fs::read_link(state.join("current")).unwrap(), current);
         assert_eq!(fs::read_dir(state.join("states")).unwrap().count(), 1);
@@ -772,21 +778,19 @@ mod tests {
         let (mut old_config, old_manifest) = manifest(
             &temp.0,
             "old.json",
-            true,
             json!({
                 ".config/app/current": old,
                 ".config/app/removed": removed,
-                ".config/app/theme": {"facet": "theme"}
+                ".config/app/theme": {"root": 0}
             }),
         );
         let (mut new_config, new_manifest) = manifest(
             &temp.0,
             "new.json",
-            true,
             json!({
                 ".config/app/current": new,
                 ".config/app/added": added,
-                ".config/app/theme": {"facet": "theme"}
+                ".config/app/theme": {"root": 0}
             }),
         );
         let state = temp.0.join("state");
@@ -873,7 +877,7 @@ mod tests {
         let target = temp.0.join(dynamic);
         assert_eq!(
             fs::read_link(&target).unwrap(),
-            state.join("current/root/theme").join(dynamic)
+            state.join("current/root/0").join(dynamic)
         );
         assert_eq!(fs::read_to_string(&target).unwrap(), "light");
         assert!(fs::read_to_string(&log)
@@ -947,7 +951,8 @@ mod tests {
     #[test]
     fn effect_failures_finish_concurrently_without_rolling_back_state() {
         let temp = TestDir::new("effect-failures");
-        let (mut config, manifest_path, state) = fixture(&temp.0, false);
+        let (mut config, manifest_path) = manifest(&temp.0, "manifest.json", json!({}));
+        let state = temp.0.join("state");
         activate(&config, &manifest_path, &state).unwrap();
         let failure = script(&temp.0, "fail", "printf 'broken' >&2\nexit 7");
         let timeout = script(&temp.0, "timeout", "sleep 5");
@@ -1013,7 +1018,7 @@ mod tests {
                 fs::File::open(state.join("current/selection.json")).unwrap()
             )
             .unwrap(),
-            json!({"theme": "light"})
+            json!({"theme": "light", "density": "compact"})
         );
     }
 }

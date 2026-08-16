@@ -17,19 +17,36 @@ def main [manifest_path: string source_path: string expected_home: string expect
   assert-equal $manifest.version 1 "manifest version"
   assert-equal $manifest.home $expected_home "manifest home"
   assert-equal $manifest.existingFileStrategy "backup" "existing file strategy"
-  assert-equal ($manifest.facets | columns) [theme] "manifest facets"
+  assert-equal ($manifest.facets | columns) [density theme] "manifest facets"
   assert-equal $manifest.facets.theme.default $expected_default "facet default"
-  assert-equal ($manifest.facets.theme.variants | columns | sort) [dark light] "facet variants"
+  assert-equal ($manifest.facets.theme.variants | sort) [dark light] "facet variants"
+  assert-equal $manifest.facets.density.default compact "density default"
+  assert-equal ($manifest.facets.density.variants | sort) [compact roomy] "density variants"
 
   assert-equal ($manifest.files | columns | sort) [
     ".config/demo/dynamic-source.nu"
     ".config/demo/dynamic.txt"
+    ".config/demo/multi.txt"
     ".config/demo/static-source.nu"
     ".config/demo/static.txt"
     "extra.txt"
   ] "managed files"
-  assert-equal $manifest.files.".config/demo/dynamic-source.nu" {facet: theme} "dynamic source"
-  assert-equal $manifest.files.".config/demo/dynamic.txt" {facet: theme} "dynamic text"
+  let roots = $manifest.roots | enumerate
+  let theme_root = $roots | where item.facets == [theme] | first
+  assert-equal $manifest.files.".config/demo/dynamic-source.nu" {root: $theme_root.index} "dynamic source"
+  assert-equal $manifest.files.".config/demo/dynamic.txt" {root: $theme_root.index} "dynamic text"
+
+  let multi_root = $roots | where item.facets == [density theme] | first
+  assert-equal ($multi_root.item.variants | length) 4 "multi-facet variants"
+  assert-equal $manifest.files.".config/demo/multi.txt" {root: $multi_root.index} "multi-facet file"
+  for entry in ($multi_root.item.variants | zip [
+    "density=compact;tone=dark"
+    "density=compact;tone=light"
+    "density=roomy;tone=dark"
+    "density=roomy;tone=light"
+  ]) {
+    assert-equal (open --raw ($entry.0 | path join ".config/demo/multi.txt")) $entry.1 "multi-facet contents"
+  }
 
   let static_text = $manifest.files.".config/demo/static.txt"
   assert-equal (open --raw $static_text) "static" "static text contents"
@@ -38,8 +55,9 @@ def main [manifest_path: string source_path: string expected_home: string expect
   assert-true ($static_source != $source_path) "static source was not materialized"
   assert-true ($static_source | path exists) "materialized static source is missing"
 
-  for variant in [dark light] {
-    let root = $manifest.facets.theme.variants | get $variant
+  for entry in ([dark light] | enumerate) {
+    let variant = $entry.item
+    let root = $theme_root.item.variants | get $entry.index
     assert-true ($root | path exists) $"($variant) variant root is missing"
     assert-equal (open --raw ($root | path join ".config/demo/dynamic.txt")) $"tone=($variant)" $"($variant) dynamic text"
 

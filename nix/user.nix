@@ -32,27 +32,27 @@
     };
   };
 
-  fileEffectOptionType = types.submodule {
-    options = {
-      exec = mkOption {
-        type = types.oneOf [argvType (types.functionTo argvType)];
-        description = "effect argv";
-      };
+  effectOptions = {
+    exec = mkOption {
+      type = types.oneOf [argvType (types.functionTo argvType)];
+      description = "effect argv";
+    };
 
-      ignoreFailure = mkOption {
-        type = types.bool;
-        default = false;
-        description = "whether to ignore a nonzero exit status";
-      };
+    ignoreFailure = mkOption {
+      type = types.bool;
+      default = false;
+      description = "whether to ignore a nonzero exit status";
     };
   };
+
+  fileEffectOptionType = types.submodule {options = effectOptions;};
 
   fileOptionType = types.submodule {
     options = {
       facet = mkOption {
-        type = types.nullOr types.str;
+        type = types.nullOr (types.coercedTo types.str lib.singleton (types.listOf types.str));
         default = null;
-        description = "facet used to generate this file";
+        description = "facets used to generate this file";
       };
 
       value = mkOption {
@@ -69,22 +69,11 @@
   };
 
   effectOptionType = types.submodule {
-    options = {
+    options = effectOptions // {
       on = mkOption {
         type = types.listOf types.str;
         default = [];
         description = "facets that trigger this effect during a switch";
-      };
-
-      exec = mkOption {
-        type = types.oneOf [argvType (types.functionTo argvType)];
-        description = "effect argv";
-      };
-
-      ignoreFailure = mkOption {
-        type = types.bool;
-        default = false;
-        description = "whether to ignore a nonzero exit status";
       };
     };
   };
@@ -108,7 +97,7 @@
   renderArgv = map (argument: toString (materialize argument));
 
   directories = cfg.path;
-  roots = lib.mapAttrs (_: directory:
+  directoryRoots = lib.mapAttrs (_: directory:
     if directory == home
     then ""
     else if lib.hasPrefix "${home}/" directory
@@ -117,21 +106,28 @@
   directories;
 
   files = lib.concatMap (kind:
-    lib.mapAttrsToList (path: file: {
+    lib.mapAttrsToList (path: file: let
+      facets =
+        if file.facet == null
+        then []
+        else lib.sort builtins.lessThan file.facet;
+    in {
       path =
-        if roots.${kind} == null || roots.${kind} == ""
+        if directoryRoots.${kind} == null || directoryRoots.${kind} == ""
         then path
-        else "${roots.${kind}}/${path}";
+        else "${directoryRoots.${kind}}/${path}";
       valid = lib.all validSegment (lib.splitString "/" path);
-      inherit (file) effect facet value;
+      rootKey = builtins.toJSON facets;
+      inherit facets;
+      inherit (file) effect value;
     })
     cfg.file.${kind})
   fileKinds;
   filesByPath = lib.groupBy (file: file.path) files;
   managedPaths = builtins.attrNames filesByPath;
-  dynamicFilesByFacet = lib.pipe files [
-    (lib.filter (file: lib.isFunction file.value && file.facet != null))
-    (lib.groupBy (file: file.facet))
+  dynamicFilesByRoot = lib.pipe files [
+    (lib.filter (file: lib.isFunction file.value))
+    (lib.groupBy (file: file.rootKey))
   ];
 
   resolvedFacets = materialize cfg.facet;
@@ -140,32 +136,42 @@
     value = resolvedFacets.${facet}.variants.${variant};
   };
 
-  variantRoots = lib.mapAttrs (facet: data: let
-    dynamicFiles = dynamicFilesByFacet.${facet} or [];
-  in
-    lib.mapAttrs (variant: _:
-      if dynamicFiles == []
-      then pkgs.emptyDirectory
-      else
-        pkgs.runCommandLocal (lib.strings.sanitizeDerivationName "seni-${name}-${facet}-${variant}") {} ''
-          set -eu
-          mkdir -p "$out"
-          ${lib.concatMapStringsSep "\n" (file: let
-            value = materialize (file.value (context facet variant));
-          in
-            ''
-              target="$out"/${lib.escapeShellArg file.path}
-              mkdir -p "$(dirname "$target")"
-            ''
-            + (
-              if builtins.isString value
-              then ''printf '%s' ${lib.escapeShellArg value} > "$target"''
-              else ''ln -s ${lib.escapeShellArg (toString value)} "$target"''
-            ))
-          dynamicFiles}
-        '')
-    data.variants)
-  cfg.facet;
+  buildRoot = rootName: dynamicFiles: fileContext:
+    pkgs.runCommandLocal (lib.strings.sanitizeDerivationName rootName) {} ''
+      set -eu
+      mkdir -p "$out"
+      ${lib.concatMapStringsSep "\n" (file: let
+        value = materialize (file.value fileContext);
+      in
+        ''
+          target="$out"/${lib.escapeShellArg file.path}
+          mkdir -p "$(dirname "$target")"
+        ''
+        + (
+          if builtins.isString value
+          then ''printf '%s' ${lib.escapeShellArg value} > "$target"''
+          else ''ln -s ${lib.escapeShellArg (toString value)} "$target"''
+        ))
+      dynamicFiles}
+    '';
+
+  roots = lib.mapAttrsToList (key: dynamicFiles: let
+    facets = (builtins.head dynamicFiles).facets;
+    selections = lib.cartesianProduct (lib.genAttrs facets (facet: builtins.attrNames cfg.facet.${facet}.variants));
+  in {
+    inherit facets key;
+    variants = map (selection:
+      buildRoot
+      ("seni-${name}-" + lib.concatMapStringsSep "-" (facet: "${facet}-${selection.${facet}}") facets)
+      dynamicFiles
+      (lib.mapAttrs context selection))
+    selections;
+  })
+  dynamicFilesByRoot;
+  rootIndices = lib.pipe roots [
+    (lib.imap0 (index: root: lib.nameValuePair root.key index))
+    builtins.listToAttrs
+  ];
 
   fileEffects = lib.pipe files [
     (lib.filter (file: file.effect != null))
@@ -174,7 +180,7 @@
       value =
         file.effect
         // {
-          on = lib.optional (file.facet != null) file.facet;
+          on = file.facets;
         };
     }))
     builtins.listToAttrs
@@ -197,7 +203,7 @@
           inherit facet;
           variants =
             if builtins.hasAttr facet cfg.facet
-            then lib.mapAttrs (variant: _: renderArgv (exec (context facet variant))) cfg.facet.${facet}.variants
+            then lib.mapAttrs (variant: _: renderArgv (exec {${facet} = context facet variant;})) cfg.facet.${facet}.variants
             else {};
         }
         else renderArgv exec;
@@ -210,15 +216,19 @@
     facets =
       lib.mapAttrs (facet: data: {
         inherit (data) default;
-        variants = lib.mapAttrs (variant: _: toString variantRoots.${facet}.${variant}) data.variants;
+        variants = builtins.attrNames data.variants;
       })
       cfg.facet;
+    roots = map (root: {
+      inherit (root) facets;
+      variants = map toString root.variants;
+    }) roots;
     files = lib.pipe files [
       (map (file: {
         name = file.path;
         value =
           if lib.isFunction file.value
-          then {facet = file.facet;}
+          then {root = rootIndices.${file.rootKey};}
           else if builtins.isString file.value
           then toString (pkgs.writeText (lib.strings.sanitizeDerivationName "seni-${name}-${file.path}") file.value)
           else toString (materialize file.value);
@@ -354,7 +364,7 @@ in {
         message = "facets must have variants and a valid default";
       }
       {
-        assertion = lib.all (kind: cfg.file.${kind} == {} || roots.${kind} != null) fileKinds;
+        assertion = lib.all (kind: cfg.file.${kind} == {} || directoryRoots.${kind} != null) fileKinds;
         message = "file directories must be within the home directory";
       }
       {
@@ -362,11 +372,11 @@ in {
         message = "file paths must be normalized relative paths";
       }
       {
-        assertion = lib.all (file: lib.isFunction file.value == (file.facet != null)) files;
+        assertion = lib.all (file: lib.isFunction file.value == (file.facets != [])) files;
         message = "function file values require a facet, and static values cannot set one";
       }
       {
-        assertion = lib.all (file: file.facet == null || builtins.hasAttr file.facet cfg.facet) files;
+        assertion = lib.all (file: lib.allUnique file.facets && lib.all (facet: builtins.hasAttr facet cfg.facet) file.facets) files;
         message = "files must reference defined facets";
       }
       {

@@ -18,6 +18,13 @@
         };
       };
     };
+    facet.density = {
+      default = "compact";
+      variants = {
+        compact = "compact";
+        roomy = "roomy";
+      };
+    };
 
     file.config = {
       "demo/static.txt" = {
@@ -27,7 +34,7 @@
       "demo/static-source.nu".value = fixture;
       "demo/dynamic.txt" = {
         facet = "theme";
-        value = context: "tone=${context.value.tone}";
+        value = {theme}: "tone=${theme.value.tone}";
         effect = {
           exec = ["/bin/true"];
           ignoreFailure = true;
@@ -35,7 +42,11 @@
       };
       "demo/dynamic-source.nu" = {
         facet = "theme";
-        value = context: context.value.asset;
+        value = {theme}: theme.value.asset;
+      };
+      "demo/multi.txt" = {
+        facet = ["theme" "density"];
+        value = {density, theme}: "density=${density.value};tone=${theme.value.tone}";
       };
     };
     file.home."extra.txt".value = "extra";
@@ -49,7 +60,7 @@
       };
       dynamic = {
         on = ["theme"];
-        exec = context: ["/bin/echo" context.value.asset];
+        exec = {theme}: ["/bin/echo" theme.value.asset];
       };
     };
   };

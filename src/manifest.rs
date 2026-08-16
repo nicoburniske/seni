@@ -15,11 +15,21 @@ pub struct FacetId(usize);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct VariantId(usize);
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RootId(usize);
+
+impl RootId {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub home: PathBuf,
     pub existing_file_strategy: ExistingFileStrategy,
     pub facets: IndexMap<Box<str>, Facet>,
+    pub roots: Box<[Root]>,
     pub files: IndexMap<Box<str>, Source>,
     pub effects: Box<[Effect]>,
 }
@@ -35,18 +45,19 @@ pub enum ExistingFileStrategy {
 #[derive(Debug)]
 pub struct Facet {
     pub default: VariantId,
-    pub variants: IndexMap<Box<str>, Variant>,
+    pub variants: IndexMap<Box<str>, ()>,
 }
 
 #[derive(Debug)]
-pub struct Variant {
-    pub root: PathBuf,
+pub struct Root {
+    pub facets: Box<[FacetId]>,
+    pub variants: Box<[PathBuf]>,
 }
 
 #[derive(Debug)]
 pub enum Source {
     Static(PathBuf),
-    Facet(FacetId),
+    Root(RootId),
 }
 
 #[derive(Debug)]
@@ -98,14 +109,14 @@ impl Config {
             }
 
             let mut variants = IndexMap::with_capacity(raw_facet.variants.len());
-            for (variant_name, root) in raw_facet.variants {
+            for variant_name in raw_facet.variants {
                 if variant_name.is_empty() {
                     return Err(error!("facet '{name}' has an empty variant name"));
                 }
-                if !root.is_absolute() {
-                    return Err(error!("root for {name}={variant_name} must be absolute"));
+                if variants.contains_key(variant_name.as_ref()) {
+                    return Err(error!("facet '{name}' repeats variant '{variant_name}'"));
                 }
-                variants.insert(variant_name, Variant { root });
+                variants.insert(variant_name, ());
             }
             let default = variants
                 .get_index_of(raw_facet.default.as_ref())
@@ -115,6 +126,45 @@ impl Config {
                     raw_facet.default
                 ))?;
             facets.insert(name, Facet { default, variants });
+        }
+
+        let mut roots = Vec::with_capacity(raw.roots.len());
+        for (index, raw_root) in raw.roots.into_iter().enumerate() {
+            if raw_root.facets.is_empty() {
+                return Err(error!("root {index} must reference at least one facet"));
+            }
+
+            let mut root_facets = Vec::with_capacity(raw_root.facets.len());
+            let mut variant_count = 1;
+            for facet in raw_root.facets {
+                let facet_id =
+                    facets
+                        .get_index_of(facet.as_ref())
+                        .map(FacetId)
+                        .context(format_args!(
+                            "root {index} references unknown facet '{facet}'"
+                        ))?;
+                if root_facets.contains(&facet_id) {
+                    return Err(error!("root {index} repeats facet '{facet}'"));
+                }
+                variant_count *= facets.get_index(facet_id.0).unwrap().1.variants.len();
+                root_facets.push(facet_id);
+            }
+            if raw_root.variants.len() != variant_count {
+                return Err(error!(
+                    "root {index} has {} variants, expected {variant_count}",
+                    raw_root.variants.len()
+                ));
+            }
+            for variant in &raw_root.variants {
+                if !variant.is_absolute() {
+                    return Err(error!("variant for root {index} must be absolute"));
+                }
+            }
+            roots.push(Root {
+                facets: root_facets.into_boxed_slice(),
+                variants: raw_root.variants.into_boxed_slice(),
+            });
         }
 
         let mut files = IndexMap::with_capacity(raw.files.len());
@@ -127,21 +177,20 @@ impl Config {
                     "managed file path '{path}' must be a normalized relative path"
                 ));
             }
-            let source =
-                match raw_file {
-                    RawManagedFile::Static(source) => {
-                        if !source.is_absolute() {
-                            return Err(error!("static source for '{path}' must be absolute"));
-                        }
-                        Source::Static(source)
+            let source = match raw_file {
+                RawManagedFile::Static(source) => {
+                    if !source.is_absolute() {
+                        return Err(error!("static source for '{path}' must be absolute"));
                     }
-                    RawManagedFile::Facet { facet } => {
-                        let facet_id = facets.get_index_of(facet.as_ref()).map(FacetId).context(
-                            format_args!("file '{path}' references unknown facet '{facet}'"),
-                        )?;
-                        Source::Facet(facet_id)
+                    Source::Static(source)
+                }
+                RawManagedFile::Root { root } => {
+                    if root >= roots.len() {
+                        return Err(error!("file '{path}' references unknown root {root}"));
                     }
-                };
+                    Source::Root(RootId(root))
+                }
+            };
             files.insert(path, source);
         }
 
@@ -219,6 +268,7 @@ impl Config {
             home: raw.home,
             existing_file_strategy: raw.existing_file_strategy,
             facets,
+            roots: roots.into_boxed_slice(),
             files,
             effects: effects.into_boxed_slice(),
         })
@@ -237,6 +287,21 @@ impl Config {
             .iter()
             .enumerate()
             .map(|(index, (name, facet))| (FacetId(index), name.as_ref(), facet))
+    }
+
+    pub fn roots(&self) -> impl ExactSizeIterator<Item = (RootId, &Root)> {
+        self.roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| (RootId(index), root))
+    }
+
+    pub fn root_variant(&self, id: RootId, selection: &Selection) -> &Path {
+        let root = &self.roots[id.0];
+        let index = root.facets.iter().fold(0, |index, facet| {
+            index * self[*facet].variants.len() + selection[*facet].0
+        });
+        &root.variants[index]
     }
 
     pub fn default_selection(&self) -> Selection {
@@ -275,9 +340,8 @@ impl Facet {
         self.variants.get_index_of(name).map(VariantId)
     }
 
-    pub fn variant(&self, id: VariantId) -> (&str, &Variant) {
-        let (name, variant) = self.variants.get_index(id.0).unwrap();
-        (name, variant)
+    pub fn variant(&self, id: VariantId) -> &str {
+        self.variants.get_index(id.0).unwrap().0
     }
 }
 
@@ -295,14 +359,6 @@ impl Index<FacetId> for Config {
 
     fn index(&self, index: FacetId) -> &Self::Output {
         self.facets.get_index(index.0).unwrap().1
-    }
-}
-
-impl Index<VariantId> for Facet {
-    type Output = Variant;
-
-    fn index(&self, index: VariantId) -> &Self::Output {
-        self.variants.get_index(index.0).unwrap().1
     }
 }
 
@@ -359,6 +415,8 @@ struct RawManifest {
     existing_file_strategy: ExistingFileStrategy,
     facets: IndexMap<Box<str>, RawFacet>,
     #[serde(default)]
+    roots: Vec<RawRoot>,
+    #[serde(default)]
     files: IndexMap<Box<str>, RawManagedFile>,
     #[serde(default)]
     effects: IndexMap<Box<str>, RawEffect>,
@@ -368,14 +426,21 @@ struct RawManifest {
 #[serde(deny_unknown_fields)]
 struct RawFacet {
     default: Box<str>,
-    variants: IndexMap<Box<str>, PathBuf>,
+    variants: Vec<Box<str>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRoot {
+    facets: Vec<Box<str>>,
+    variants: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 enum RawManagedFile {
     Static(PathBuf),
-    Facet { facet: Box<str> },
+    Root { root: usize },
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,14 +475,15 @@ mod tests {
         "facets": {
             "theme": {
                 "default": "dark",
-                "variants": {
-                    "light": "/nix/store/light",
-                    "dark": "/nix/store/dark"
-                }
+                "variants": ["light", "dark"]
             }
         },
+        "roots": [{
+            "facets": ["theme"],
+            "variants": ["/nix/store/light", "/nix/store/dark"]
+        }],
         "files": {
-            ".config/app": {"facet": "theme"},
+            ".config/app": {"root": 0},
             ".config/static": "/nix/store/static"
         },
         "effects": {
@@ -455,7 +521,7 @@ mod tests {
         assert_eq!(facet.default, VariantId(1));
         assert!(matches!(
             config.files.get_index(0).unwrap().1,
-            Source::Facet(id) if *id == theme
+            Source::Root(id) if id.index() == 0
         ));
         assert!(config.effects[0].ignore_failure);
         assert_eq!(config.effects[1].on.as_ref(), [theme]);
@@ -485,7 +551,7 @@ mod tests {
         assert!(parse(value).is_err());
 
         let mut value = valid_config();
-        value["files"][".config/app"]["facet"] = json!("missing");
+        value["files"][".config/app"]["root"] = json!(1);
         assert!(parse(value).is_err());
 
         let mut value = valid_config();
@@ -499,7 +565,7 @@ mod tests {
             let mut value = valid_config();
             let files = value["files"].as_object_mut().unwrap();
             files.clear();
-            files.insert(path.to_string(), json!({"facet": "theme"}));
+            files.insert(path.to_string(), json!({"root": 0}));
             assert!(parse(value).is_err());
         }
     }

@@ -44,7 +44,7 @@ pkgs.testers.nixosTest {
             ${nameFile}.value = name;
             ".seni-theme" = {
               facet = "theme";
-              value = {value, ...}: value;
+              value = {theme}: theme.value;
             };
           };
         })

@@ -28,8 +28,9 @@ seni.users.nico = {
 
   file.config."helix/config.toml" = {
     facet = "theme";
-    value = {value, ...}: ''
-      theme = "${value}"
+    value = {theme}: ''
+      # seni variant: ${theme.variant}
+      theme = "${theme.value}"
     '';
     effect = {
       # reload helix config
@@ -39,6 +40,8 @@ seni.users.nico = {
   };
 };
 ```
+
+a file can also depend on several facets: `facet = ["theme" "density"]`
 
 facet switching is done via the CLI:
 
