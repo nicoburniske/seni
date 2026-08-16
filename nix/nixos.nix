@@ -34,6 +34,7 @@ in {
       lib.nameValuePair "seni-${name}" {
         description = "Activate Seni for ${name}";
         before = ["systemd-user-sessions.service"];
+        environment.XDG_RUNTIME_DIR = "/run/user/%U";
         wantedBy = ["multi-user.target"];
         unitConfig.RequiresMountsFor = [user.path.home user.path.state];
         serviceConfig = {

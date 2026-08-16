@@ -69,6 +69,7 @@ pkgs.testers.nixosTest {
     machine.wait_for_unit("multi-user.target")
     machine.succeed("systemctl is-active seni-alice.service")
     machine.succeed("systemctl is-active seni-bob.service")
+    machine.succeed("systemctl cat seni-alice.service | grep -F 'XDG_RUNTIME_DIR=/run/user/%U'")
     machine.fail("systemctl is-active user@1000.service")
     machine.fail("systemctl is-active user@1001.service")
 
