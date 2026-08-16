@@ -348,6 +348,19 @@ in {
         message = "file destinations cannot contain one another";
       }
       {
+        assertion = let
+          state = "${cfg.path.state}/seni";
+          relative = lib.removePrefix "${home}/" state;
+        in
+          !lib.hasPrefix "${home}/" state
+          || !lib.any (path:
+            path == relative
+            || lib.hasPrefix "${relative}/" path
+            || lib.hasPrefix "${path}/" relative)
+          managedPaths;
+        message = "file destinations cannot overlap the Seni state directory";
+      }
+      {
         assertion = lib.all (effectName: let
           effect = cfg.effect.${effectName};
         in

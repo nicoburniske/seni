@@ -61,10 +61,14 @@
   };
 
   failedAssertions = lib.filter (entry: !entry.assertion) eval.config.assertions;
+  stateCollisionAssertions = (eval.extendModules {
+    modules = [{file.state."seni/current".value = fixture;}];
+  }).config.assertions;
   environment = eval.config.environment;
   manifest = eval.config.generated.manifest;
 in
   assert lib.assertMsg (failedAssertions == []) (lib.concatMapStringsSep "; " (entry: entry.message) failedAssertions);
+  assert lib.assertMsg (lib.any (entry: !entry.assertion && entry.message == "file destinations cannot overlap the Seni state directory") stateCollisionAssertions) "Seni's state directory was accepted as a file destination";
   assert lib.assertMsg (environment.sessionVariables
     == {
       EDITOR = "hx";
