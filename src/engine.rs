@@ -1,7 +1,6 @@
 use crate::error::{error, Context, Error};
 use crate::manifest::{Config, ManagedFile, NamedSelection, RawSelection, Selection, Source};
 use std::borrow::Cow;
-use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -103,11 +102,24 @@ pub fn activate(
         }
         fs::create_dir_all(target.parent().unwrap())
             .context(format_args!("parent directory for '{}'", target.display()))?;
-        let mut temporary = OsString::from(target.as_os_str());
-        temporary.push(".seni-tmp");
-        let temporary = PathBuf::from(temporary);
-        symlink(&*source, &temporary)
-            .context(format_args!("temporary link '{}'", temporary.display()))?;
+        let pid = std::process::id();
+        let mut attempt = 0;
+        // retry beside the target so stale candidates cannot block an atomic rename
+        let temporary = loop {
+            let candidate = target.with_added_extension(format!("seni-tmp-{pid}-{attempt}"));
+            match symlink(&*source, &candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(Error::context(
+                        format_args!("temporary link '{}'", candidate.display()),
+                        error,
+                    ))
+                }
+            }
+        };
         if let Err(context) = fs::rename(&temporary, &target) {
             if let Err(error) = fs::remove_file(&temporary) {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -763,13 +775,14 @@ mod tests {
             }),
         );
         let state = temp.0.join("state");
-        let temporary = temp.0.join(".config/app/current.seni-tmp");
+        let temporary = temp.0.join(format!(
+            ".config/app/current.seni-tmp-{}-0",
+            std::process::id()
+        ));
         fs::create_dir_all(temporary.parent().unwrap()).unwrap();
         symlink(&old, &temporary).unwrap();
-        assert!(activate(&old_config, &old_manifest, &state).is_err());
-        assert_eq!(fs::read_link(&temporary).unwrap(), old);
-        fs::remove_file(&temporary).unwrap();
         activate(&old_config, &old_manifest, &state).unwrap();
+        assert_eq!(fs::read_link(&temporary).unwrap(), old);
 
         let log = temp.0.join("effects.log");
         let recorder = script(&temp.0, "record", "printf '%s\\n' \"$1\" >> \"$2\"");
