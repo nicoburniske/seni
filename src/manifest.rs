@@ -70,8 +70,10 @@ pub enum EffectExec {
 pub struct Selection(Box<[VariantId]>);
 
 impl Config {
-    pub fn parse(reader: impl Read) -> crate::Result<Self> {
-        let raw: RawManifest = serde_json::from_reader(reader).context("manifest JSON")?;
+    pub fn parse(mut reader: impl Read) -> crate::Result<Self> {
+        let mut json = String::new();
+        reader.read_to_string(&mut json).context("manifest JSON")?;
+        let raw: RawManifest = serde_json::from_str(&json).context("manifest JSON")?;
         if raw.version != 1 {
             return Err(error!("unsupported version {}, expected 1", raw.version));
         }

@@ -53,13 +53,18 @@ pub fn activate(
     for (path, configured_source) in &config.files {
         let target = config.home.join(path.as_ref());
         let source = managed_source(config, state_dir, path, configured_source);
-        let metadata = path_metadata(&target)?;
-        let actual = match &metadata {
-            Some(metadata) if metadata.file_type().is_symlink() => Some(
-                fs::read_link(&target).context(format_args!("read link '{}'", target.display()))?,
-            ),
-            _ => None,
+        // managed targets are normally symlinks, so read them before falling back to metadata
+        let (actual, metadata) = match fs::read_link(&target) {
+            Ok(actual) => (Some(actual), None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                (None, path_metadata(&target)?)
+            }
+            Err(error) => {
+                return Err(error).context(format_args!("read link '{}'", target.display()))
+            }
         };
+        let exists = actual.is_some() || metadata.is_some();
 
         if actual.as_deref() == Some(source.as_ref()) {
             continue;
@@ -74,9 +79,9 @@ pub fn activate(
         let parent = target.parent().unwrap();
         fs::create_dir_all(parent)
             .context(format_args!("create directory '{}'", parent.display()))?;
-        let temporary = TemporaryLink::create(&source, &target)?;
+        let mut temporary = TemporaryLink::create(&source, &target)?;
 
-        if let Some(metadata) = metadata.as_ref().filter(|_| !owned) {
+        if exists && !owned {
             match config.existing_file_strategy {
                 ExistingFileStrategy::Fail => {
                     return Err(error!(
@@ -85,7 +90,10 @@ pub fn activate(
                     ));
                 }
                 ExistingFileStrategy::Clobber => {
-                    if metadata.file_type().is_dir() {
+                    if metadata
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.file_type().is_dir())
+                    {
                         fs::remove_dir_all(&target)
                             .context(format_args!("remove directory '{}'", target.display()))?;
                     }
@@ -105,8 +113,9 @@ pub fn activate(
                 }
             }
         }
-        fs::rename(&temporary.0, &target)
+        fs::rename(&temporary.path, &target)
             .context(format_args!("install link '{}'", target.display()))?;
+        temporary.installed = true;
     }
 
     pending.commit(state_dir)?;
@@ -270,7 +279,10 @@ fn path_points_to(path: &Path, expected: &Path) -> crate::Result<bool> {
     }
 }
 
-struct TemporaryLink(PathBuf);
+struct TemporaryLink {
+    path: PathBuf,
+    installed: bool,
+}
 
 impl TemporaryLink {
     fn create(source: &Path, target: &Path) -> crate::Result<Self> {
@@ -280,7 +292,12 @@ impl TemporaryLink {
         loop {
             let candidate = target.with_added_extension(format!("seni-tmp-{pid}-{attempt}"));
             match symlink(source, &candidate) {
-                Ok(()) => return Ok(Self(candidate)),
+                Ok(()) => {
+                    return Ok(Self {
+                        path: candidate,
+                        installed: false,
+                    })
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
                 Err(error) => {
                     return Err(error!("temporary link '{}': {error}", candidate.display()))
@@ -292,11 +309,14 @@ impl TemporaryLink {
 
 impl Drop for TemporaryLink {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.0) {
+        if self.installed {
+            return;
+        }
+        if let Err(error) = fs::remove_file(&self.path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 eprintln!(
                     "seni: warning: temporary link '{}': {error}",
-                    self.0.display()
+                    self.path.display()
                 );
             }
         }
