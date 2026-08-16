@@ -1,5 +1,7 @@
 use crate::error::{error, Context, Error};
-use crate::manifest::{Config, ManagedFile, NamedSelection, RawSelection, Selection, Source};
+use crate::manifest::{
+    Config, ExistingFileStrategy, ManagedFile, NamedSelection, RawSelection, Selection, Source,
+};
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::symlink;
@@ -29,55 +31,6 @@ pub fn activate(
 
     let mut pending = state.build(config, manifest_path, &selection)?;
 
-    for file in &config.files {
-        let target = config.home.join(file.path.as_ref());
-        let source = managed_source(config, state_dir, file);
-        let metadata = match fs::symlink_metadata(&target) {
-            Err(context) if context.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(context) => {
-                return Err(Error::context(
-                    format_args!("managed target '{}'", target.display()),
-                    context,
-                ))
-            }
-            Ok(metadata) => metadata,
-        };
-        let actual = if metadata.file_type().is_symlink() {
-            Some(
-                fs::read_link(&target)
-                    .context(format_args!("managed target '{}'", target.display()))?,
-            )
-        } else {
-            None
-        };
-        if actual.as_deref() == Some(source.as_ref()) {
-            continue;
-        }
-
-        let previous_file = previous
-            .as_ref()
-            .filter(|previous| previous.home == config.home)
-            .and_then(|previous| {
-                previous
-                    .files
-                    .iter()
-                    .find(|previous| previous.path == file.path)
-                    .map(|file| (previous, file))
-            });
-        let owned = match previous_file {
-            Some((previous, file)) => {
-                actual.as_deref() == Some(managed_source(previous, state_dir, file).as_ref())
-            }
-            None => false,
-        };
-        if !owned {
-            return Err(error!(
-                "managed target '{}' already exists",
-                target.display()
-            ));
-        }
-    }
-
     if let Some(previous) = &previous {
         for file in &previous.files {
             if previous.home == config.home
@@ -102,37 +55,51 @@ pub fn activate(
         }
         fs::create_dir_all(target.parent().unwrap())
             .context(format_args!("parent directory for '{}'", target.display()))?;
-        let pid = std::process::id();
-        let mut attempt = 0;
-        // retry beside the target so stale candidates cannot block an atomic rename
-        let temporary = loop {
-            let candidate = target.with_added_extension(format!("seni-tmp-{pid}-{attempt}"));
-            match symlink(&*source, &candidate) {
-                Ok(()) => break candidate,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    attempt += 1;
+        let temporary = TemporaryLink::create(&source, &target)?;
+        match config.existing_file_strategy {
+            ExistingFileStrategy::Fail => {
+                if !owned_by_previous(previous.as_ref(), config, state_dir, file, &target)?
+                    && path_metadata(&target, "managed target")?.is_some()
+                {
+                    return Err(error!(
+                        "managed target '{}' already exists",
+                        target.display()
+                    ));
                 }
-                Err(error) => {
-                    return Err(Error::context(
-                        format_args!("temporary link '{}'", candidate.display()),
-                        error,
-                    ))
-                }
+                replace_target(&temporary, &target)?;
             }
-        };
-        if let Err(context) = fs::rename(&temporary, &target) {
-            if let Err(error) = fs::remove_file(&temporary) {
-                if error.kind() != std::io::ErrorKind::NotFound {
+            ExistingFileStrategy::Clobber => {
+                if path_metadata(&target, "managed target")?
+                    .is_some_and(|metadata| metadata.file_type().is_dir())
+                {
+                    fs::remove_dir_all(&target)
+                        .context(format_args!("managed target '{}'", target.display()))?;
+                }
+                replace_target(&temporary, &target)?;
+            }
+            ExistingFileStrategy::Backup => {
+                if owned_by_previous(previous.as_ref(), config, state_dir, file, &target)?
+                    || path_metadata(&target, "managed target")?.is_none()
+                {
+                    replace_target(&temporary, &target)?;
+                } else {
+                    let backup = target.with_added_extension("seni-backup");
+                    if path_metadata(&backup, "backup target")?.is_some() {
+                        return Err(error!(
+                            "backup target '{}' already exists",
+                            backup.display()
+                        ));
+                    }
+                    fs::rename(&target, &backup)
+                        .context(format_args!("backup target '{}'", target.display()))?;
+                    replace_target(&temporary, &target)?;
                     eprintln!(
-                        "seni: warning: temporary link '{}': {error}",
-                        temporary.display()
+                        "seni: backed up '{}' to '{}'",
+                        target.display(),
+                        backup.display()
                     );
                 }
             }
-            return Err(Error::context(
-                format_args!("managed link '{}'", target.display()),
-                context,
-            ));
         }
     }
 
@@ -294,16 +261,20 @@ fn managed_source<'a>(
     }
 }
 
+fn path_metadata(path: &Path, description: &str) -> crate::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::context(
+            format_args!("{description} '{}'", path.display()),
+            error,
+        )),
+    }
+}
+
 fn path_points_to(path: &Path, expected: &Path) -> crate::Result<bool> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(context) if context.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(context) => {
-            return Err(Error::context(
-                format_args!("managed target '{}'", path.display()),
-                context,
-            ))
-        }
+    let Some(metadata) = path_metadata(path, "managed target")? else {
+        return Ok(false);
     };
     if !metadata.file_type().is_symlink() {
         return Ok(false);
@@ -312,6 +283,67 @@ fn path_points_to(path: &Path, expected: &Path) -> crate::Result<bool> {
         fs::read_link(path).context(format_args!("managed target '{}'", path.display()))?
             == expected,
     )
+}
+
+fn owned_by_previous(
+    previous: Option<&Config>,
+    config: &Config,
+    state_dir: &Path,
+    file: &ManagedFile,
+    target: &Path,
+) -> crate::Result<bool> {
+    let Some(previous) = previous.filter(|previous| previous.home == config.home) else {
+        return Ok(false);
+    };
+    let Some(file) = previous
+        .files
+        .iter()
+        .find(|previous| previous.path == file.path)
+    else {
+        return Ok(false);
+    };
+    path_points_to(target, &managed_source(previous, state_dir, file))
+}
+
+struct TemporaryLink(PathBuf);
+
+impl TemporaryLink {
+    fn create(source: &Path, target: &Path) -> crate::Result<Self> {
+        let pid = std::process::id();
+        let mut attempt = 0;
+        // retry beside the target so stale candidates cannot block an atomic rename
+        loop {
+            let candidate = target.with_added_extension(format!("seni-tmp-{pid}-{attempt}"));
+            match symlink(source, &candidate) {
+                Ok(()) => return Ok(Self(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+                Err(error) => {
+                    return Err(Error::context(
+                        format_args!("temporary link '{}'", candidate.display()),
+                        error,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+impl Drop for TemporaryLink {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "seni: warning: temporary link '{}': {error}",
+                    self.0.display()
+                );
+            }
+        }
+    }
+}
+
+#[track_caller]
+fn replace_target(temporary: &TemporaryLink, target: &Path) -> crate::Result<()> {
+    fs::rename(&temporary.0, target).context(format_args!("managed link '{}'", target.display()))
 }
 
 struct LockedState<'a> {
@@ -607,8 +639,9 @@ mod tests {
         }
 
         let encoded = serde_json::to_vec(&json!({
-            "version": 4,
+            "version": 1,
             "home": temp,
+            "existingFileStrategy": "fail",
             "facets": Value::Object(facets),
             "files": files
         }))
@@ -670,6 +703,61 @@ mod tests {
             fs::symlink_metadata(state).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn handles_existing_files_by_configured_strategy() {
+        let temp = TestDir::new("existing-files");
+
+        for (name, strategy) in [
+            ("fail", ExistingFileStrategy::Fail),
+            ("clobber", ExistingFileStrategy::Clobber),
+            ("backup", ExistingFileStrategy::Backup),
+        ] {
+            let home = temp.0.join(name);
+            let source = temp.0.join(format!("{name}-source"));
+            fs::write(&source, "managed").unwrap();
+            let (mut config, manifest_path) =
+                manifest(&home, "manifest.json", false, json!({"target": source}));
+            config.existing_file_strategy = strategy;
+            let target = home.join("target");
+            if strategy == ExistingFileStrategy::Clobber {
+                fs::create_dir(&target).unwrap();
+                fs::write(target.join("original"), "original").unwrap();
+            } else {
+                fs::write(&target, "original").unwrap();
+            }
+
+            if strategy == ExistingFileStrategy::Backup {
+                let backup = target.with_added_extension("seni-backup");
+                fs::write(&backup, "older").unwrap();
+                assert!(activate(&config, &manifest_path, &home.join("state")).is_err());
+                assert!(!target
+                    .with_added_extension(format!("seni-tmp-{}-0", std::process::id()))
+                    .is_symlink());
+                fs::remove_file(backup).unwrap();
+            }
+
+            let result = activate(&config, &manifest_path, &home.join("state"));
+            match strategy {
+                ExistingFileStrategy::Fail => {
+                    assert!(result.unwrap_err().to_string().contains("already exists"));
+                    assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+                }
+                ExistingFileStrategy::Clobber => {
+                    result.unwrap();
+                    assert_eq!(fs::read_link(&target).unwrap(), source);
+                }
+                ExistingFileStrategy::Backup => {
+                    result.unwrap();
+                    assert_eq!(fs::read_link(&target).unwrap(), source);
+                    assert_eq!(
+                        fs::read_to_string(target.with_added_extension("seni-backup")).unwrap(),
+                        "original"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

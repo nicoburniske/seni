@@ -54,7 +54,7 @@
       name = "alice";
     };
     modules = [
-      ../user.nix
+      (import ../user.nix {existingFileStrategy = "backup";})
       profile
       {path.home = "/home/alice";}
     ];

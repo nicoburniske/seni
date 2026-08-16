@@ -46,4 +46,3 @@ each user has an independent Seni configuration and receives a configured `seni`
 ```console
 seni switch theme=dark
 ```
-

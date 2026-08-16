@@ -14,8 +14,9 @@ def main [manifest_path: string source_path: string expected_home: string expect
   let manifest = open $manifest_path
   let raw_manifest = open --raw $manifest_path
 
-  assert-equal $manifest.version 4 "manifest version"
+  assert-equal $manifest.version 1 "manifest version"
   assert-equal $manifest.home $expected_home "manifest home"
+  assert-equal $manifest.existingFileStrategy "backup" "existing file strategy"
   assert-equal ($manifest.facets | columns) [theme] "manifest facets"
   assert-equal $manifest.facets.theme.default $expected_default "facet default"
   assert-equal ($manifest.facets.theme.variants | columns | sort) [dark light] "facet variants"

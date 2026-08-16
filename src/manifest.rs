@@ -18,9 +18,18 @@ pub struct VariantId(usize);
 #[derive(Debug)]
 pub struct Config {
     pub home: PathBuf,
+    pub existing_file_strategy: ExistingFileStrategy,
     pub facets: IndexMap<Box<str>, Facet>,
     pub files: Box<[ManagedFile]>,
     pub effects: Box<[Effect]>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExistingFileStrategy {
+    Fail,
+    Clobber,
+    Backup,
 }
 
 #[derive(Debug)]
@@ -69,8 +78,8 @@ pub struct Selection(Box<[VariantId]>);
 impl Config {
     pub fn parse(reader: impl Read) -> crate::Result<Self> {
         let raw: RawManifest = serde_json::from_reader(reader).context("manifest JSON")?;
-        if raw.version != 4 {
-            return Err(error!("unsupported version {}, expected 4", raw.version));
+        if raw.version != 1 {
+            return Err(error!("unsupported version {}, expected 1", raw.version));
         }
         if !raw.home.is_absolute() {
             return Err(error!("home must be an absolute path"));
@@ -212,6 +221,7 @@ impl Config {
 
         Ok(Self {
             home: raw.home,
+            existing_file_strategy: raw.existing_file_strategy,
             facets,
             files: files.into_boxed_slice(),
             effects: effects.into_boxed_slice(),
@@ -345,6 +355,8 @@ fn parse_argv(name: &str, argv: Vec<Box<str>>) -> crate::Result<Argv> {
 struct RawManifest {
     version: u64,
     home: PathBuf,
+    #[serde(rename = "existingFileStrategy")]
+    existing_file_strategy: ExistingFileStrategy,
     facets: IndexMap<Box<str>, RawFacet>,
     #[serde(default)]
     files: IndexMap<Box<str>, RawManagedFile>,
@@ -392,8 +404,9 @@ mod tests {
     use serde_json::json;
 
     const VALID_CONFIG: &str = r#"{
-        "version": 4,
+        "version": 1,
         "home": "/home/test",
+        "existingFileStrategy": "fail",
         "facets": {
             "theme": {
                 "default": "dark",
@@ -438,6 +451,7 @@ mod tests {
         let facet = &config[theme];
 
         assert_eq!(theme, FacetId(0));
+        assert_eq!(config.existing_file_strategy, ExistingFileStrategy::Fail);
         assert_eq!(facet.default, VariantId(1));
         assert!(matches!(config.files[0].source, Source::Facet(id) if id == theme));
         assert!(config.effects[0].ignore_failure);

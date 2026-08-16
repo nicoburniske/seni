@@ -1,4 +1,4 @@
-{
+{existingFileStrategy}: {
   config,
   lib,
   name,
@@ -170,8 +170,8 @@
     cfg.effect;
 
   manifest = {
-    version = 4;
-    inherit home;
+    version = 1;
+    inherit existingFileStrategy home;
     facets =
       lib.mapAttrs (facet: data: {
         inherit (data) default;

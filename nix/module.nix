@@ -18,7 +18,10 @@
         osConfig = config;
         osOptions = options;
       };
-    modules = [./user.nix userModule] ++ cfg.extraModules;
+    modules = [
+      (import ./user.nix {inherit (cfg) existingFileStrategy;})
+      userModule
+    ] ++ cfg.extraModules;
   };
   enabledUsers = lib.filterAttrs (_: user: user.enable) cfg.users;
   users = builtins.attrValues cfg.users;
@@ -60,6 +63,12 @@ in {
       };
       default = {};
       description = "Seni user configurations";
+    };
+
+    existingFileStrategy = mkOption {
+      type = types.enum ["fail" "clobber" "backup"];
+      default = "fail";
+      description = "how to handle unmanaged files at Seni targets";
     };
 
     extraModules = mkOption {
