@@ -20,11 +20,18 @@
     };
 
     file.config = {
-      "demo/static.txt".value = "static";
+      "demo/static.txt" = {
+        value = "static";
+        effect.exec = ["/bin/true"];
+      };
       "demo/static-source.nu".value = fixture;
       "demo/dynamic.txt" = {
         facet = "theme";
         value = context: "tone=${context.value.tone}";
+        effect = {
+          exec = ["/bin/true"];
+          ignoreFailure = true;
+        };
       };
       "demo/dynamic-source.nu" = {
         facet = "theme";

@@ -32,6 +32,21 @@
     };
   };
 
+  fileEffectOptionType = types.submodule {
+    options = {
+      exec = mkOption {
+        type = types.oneOf [argvType (types.functionTo argvType)];
+        description = "effect argv";
+      };
+
+      ignoreFailure = mkOption {
+        type = types.bool;
+        default = false;
+        description = "whether to ignore a nonzero exit status";
+      };
+    };
+  };
+
   fileOptionType = types.submodule {
     options = {
       facet = mkOption {
@@ -43,6 +58,12 @@
       value = mkOption {
         type = types.oneOf [valueType (types.functionTo valueType)];
         description = "file contents or source";
+      };
+
+      effect = mkOption {
+        type = types.nullOr fileEffectOptionType;
+        default = null;
+        description = "effect triggered by this file's facet, or every switch for a static file";
       };
     };
   };
@@ -102,7 +123,7 @@
         then path
         else "${roots.${kind}}/${path}";
       valid = lib.all validSegment (lib.splitString "/" path);
-      inherit (file) facet value;
+      inherit (file) effect facet value;
     })
     cfg.file.${kind})
   fileKinds;
@@ -146,6 +167,20 @@
     data.variants)
   cfg.facet;
 
+  fileEffects = lib.pipe files [
+    (lib.filter (file: file.effect != null))
+    (map (file: {
+      name = "file:${file.path}";
+      value =
+        file.effect
+        // {
+          on = lib.optional (file.facet != null) file.facet;
+        };
+    }))
+    builtins.listToAttrs
+  ];
+  effects = cfg.effect // fileEffects;
+
   manifestEffects =
     lib.mapAttrs (_: effect: let
       exec = effect.exec;
@@ -167,7 +202,7 @@
         }
         else renderArgv exec;
     })
-    cfg.effect;
+    effects;
 
   manifest = {
     version = 1;
@@ -362,14 +397,18 @@ in {
       }
       {
         assertion = lib.all (effectName: let
-          effect = cfg.effect.${effectName};
+          effect = effects.${effectName};
         in
           effectName
           != ""
           && lib.all (facet: builtins.hasAttr facet cfg.facet) effect.on
           && (!lib.isFunction effect.exec || lib.length effect.on == 1))
-        (builtins.attrNames cfg.effect);
+        (builtins.attrNames effects);
         message = "effects must reference defined facets, and function effects require exactly one facet";
+      }
+      {
+        assertion = lib.intersectLists (builtins.attrNames cfg.effect) (builtins.attrNames fileEffects) == [];
+        message = "file effects must not conflict with explicitly named effects";
       }
       {
         assertion = lib.all (effect: let

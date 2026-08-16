@@ -49,7 +49,11 @@ def main [manifest_path: string source_path: string expected_home: string expect
     assert-true ($target | path exists) $"($variant) dynamic source target is missing"
   }
 
-  assert-equal ($manifest.effects | columns | sort) [dynamic static] "effects"
+  assert-equal ($manifest.effects | columns | sort) [dynamic "file:.config/demo/dynamic.txt" "file:.config/demo/static.txt" static] "effects"
+  assert-equal ($manifest.effects | get "file:.config/demo/static.txt").on [] "static file effect filter"
+  assert-equal ($manifest.effects | get "file:.config/demo/static.txt").exec [/bin/true] "static file effect command"
+  assert-equal ($manifest.effects | get "file:.config/demo/dynamic.txt").on [theme] "dynamic file effect filter"
+  assert-equal ($manifest.effects | get "file:.config/demo/dynamic.txt").ignoreFailure true "dynamic file effect ignored failure"
   assert-equal $manifest.effects.static.on [] "static effect filter"
   assert-equal $manifest.effects.static.ignoreFailure true "ignored static effect failure"
   assert-equal ($manifest.effects.static.exec | first) "/bin/echo" "static effect executable"
