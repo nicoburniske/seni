@@ -43,12 +43,12 @@ pub fn run<'a>(
         };
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
-        if let Err(context) = nonblocking(&stdout).and_then(|()| nonblocking(&stderr)) {
+        if let Err(error) = nonblocking(&stdout)
+            .and_then(|()| nonblocking(&stderr))
+            .context(format_args!("effect '{}' output", effect.name))
+        {
             let _ = terminate(&mut child);
-            results[result] = Some(Err(Error::context(
-                format_args!("effect '{}' output", effect.name),
-                context,
-            )));
+            results[result] = Some(Err(error));
             continue;
         }
         running.push(RunningEffect {
@@ -112,13 +112,13 @@ pub fn run<'a>(
         match polled {
             Ok(_) => {}
             Err(Errno::EINTR) => continue,
-            Err(context) => {
+            result => {
                 for effect in &mut running {
                     if let Some(mut process) = effect.process.take() {
                         let _ = terminate(&mut process.child);
                     }
                 }
-                return Err(Error::context("effects", context));
+                result.context("effects")?;
             }
         }
 
@@ -127,12 +127,12 @@ pub fn run<'a>(
                 continue;
             };
             let completion = if ready[index].0 {
-                process.stdout.drain().err().map(|context| {
-                    Completion::Failed(Error::context(
-                        format_args!("effect '{}' stdout", effect.name),
-                        context,
-                    ))
-                })
+                process
+                    .stdout
+                    .drain()
+                    .context(format_args!("effect '{}' stdout", effect.name))
+                    .err()
+                    .map(Completion::Failed)
             } else {
                 None
             }
@@ -140,23 +140,24 @@ pub fn run<'a>(
                 if !ready[index].1 {
                     return None;
                 }
-                process.stderr.drain().err().map(|context| {
-                    Completion::Failed(Error::context(
-                        format_args!("effect '{}' stderr", effect.name),
-                        context,
-                    ))
-                })
+                process
+                    .stderr
+                    .drain()
+                    .context(format_args!("effect '{}' stderr", effect.name))
+                    .err()
+                    .map(Completion::Failed)
             });
             let completion = match completion {
                 Some(completion) => Some(completion),
-                None => match process.child.try_wait() {
+                None => match process
+                    .child
+                    .try_wait()
+                    .context(format_args!("effect '{}'", effect.name))
+                {
                     Ok(Some(status)) => Some(Completion::Exited(status)),
                     Ok(None) if process.started.elapsed() >= TIMEOUT => Some(Completion::TimedOut),
                     Ok(None) => None,
-                    Err(context) => Some(Completion::Failed(Error::context(
-                        format_args!("effect '{}'", effect.name),
-                        context,
-                    ))),
+                    Err(error) => Some(Completion::Failed(error)),
                 },
             };
             let Some(completion) = completion else {
@@ -168,13 +169,11 @@ pub fn run<'a>(
                 Completion::Exited(status) => {
                     finish(effect.name, process, status, false, effect.ignore_failure)
                 }
-                Completion::TimedOut => match terminate(&mut process.child) {
-                    Ok(status) => finish(effect.name, process, status, true, effect.ignore_failure),
-                    Err(context) => Err(Error::context(
-                        format_args!("effect '{}'", effect.name),
-                        context,
-                    )),
-                },
+                Completion::TimedOut => terminate(&mut process.child)
+                    .context(format_args!("effect '{}'", effect.name))
+                    .and_then(|status| {
+                        finish(effect.name, process, status, true, effect.ignore_failure)
+                    }),
                 Completion::Failed(error) => {
                     let _ = terminate(&mut process.child);
                     Err(error)
@@ -194,13 +193,13 @@ pub fn run<'a>(
         return Err(first);
     };
     let mut count = 2;
-    let mut context = format!("- {first}\n- {second}");
+    let mut details = format!("- {first}\n- {second}");
     for failure in failures {
         count += 1;
-        context.push('\n');
-        std::fmt::write(&mut context, format_args!("- {failure}")).unwrap();
+        details.push('\n');
+        std::fmt::write(&mut details, format_args!("- {failure}")).unwrap();
     }
-    Err(Error::context(format_args!("{count} effects"), context))
+    Err(error!("{count} effects: {details}"))
 }
 
 #[cfg(not(test))]
@@ -320,22 +319,16 @@ fn finish(
                 TIMEOUT.as_secs_f32()
             ));
         }
-        return Err(Error::context(
-            format_args!(
-                "effect '{name}' timed out after {} seconds",
-                TIMEOUT.as_secs_f32()
-            ),
-            output,
+        return Err(error!(
+            "effect '{name}' timed out after {} seconds: {output}",
+            TIMEOUT.as_secs_f32()
         ));
     }
     if !status.success() && !ignore_failure {
         if output.is_empty() {
             return Err(error!("effect '{name}': {status}"));
         }
-        return Err(Error::context(
-            format_args!("effect '{name}': {status}"),
-            output,
-        ));
+        return Err(error!("effect '{name}': {status}: {output}"));
     }
     Ok(())
 }

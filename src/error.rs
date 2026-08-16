@@ -24,15 +24,6 @@ impl Error {
             location: Location::caller(),
         }
     }
-
-    #[track_caller]
-    pub fn context(message: impl fmt::Display, context: impl fmt::Display) -> Self {
-        Self {
-            message: message.to_string().into_boxed_str(),
-            context: context.to_string().into_boxed_str(),
-            location: Location::caller(),
-        }
-    }
 }
 
 impl fmt::Debug for Error {
@@ -66,7 +57,11 @@ impl<T, E: fmt::Display> Context<T> for std::result::Result<T, E> {
     fn context(self, message: impl fmt::Display) -> crate::Result<T> {
         match self {
             Ok(value) => Ok(value),
-            Err(context) => Err(Error::context(message, context)),
+            Err(context) => Err(Error {
+                message: message.to_string().into_boxed_str(),
+                context: context.to_string().into_boxed_str(),
+                location: Location::caller(),
+            }),
         }
     }
 }

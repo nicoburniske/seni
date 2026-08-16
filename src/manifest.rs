@@ -20,7 +20,7 @@ pub struct Config {
     pub home: PathBuf,
     pub existing_file_strategy: ExistingFileStrategy,
     pub facets: IndexMap<Box<str>, Facet>,
-    pub files: Box<[ManagedFile]>,
+    pub files: IndexMap<Box<str>, Source>,
     pub effects: Box<[Effect]>,
 }
 
@@ -41,12 +41,6 @@ pub struct Facet {
 #[derive(Debug)]
 pub struct Variant {
     pub root: PathBuf,
-}
-
-#[derive(Debug)]
-pub struct ManagedFile {
-    pub path: Box<str>,
-    pub source: Source,
 }
 
 #[derive(Debug)]
@@ -121,7 +115,7 @@ impl Config {
             facets.insert(name, Facet { default, variants });
         }
 
-        let mut files = Vec::with_capacity(raw.files.len());
+        let mut files = IndexMap::with_capacity(raw.files.len());
         for (path, raw_file) in raw.files {
             if path
                 .split('/')
@@ -146,7 +140,7 @@ impl Config {
                         Source::Facet(facet_id)
                     }
                 };
-            files.push(ManagedFile { path, source });
+            files.insert(path, source);
         }
 
         let mut effects = Vec::with_capacity(raw.effects.len());
@@ -167,50 +161,50 @@ impl Config {
                 on.push(facet_id);
             }
 
-            let exec =
-                match raw_effect.exec {
-                    RawEffectExec::Static(argv) => EffectExec::Static(parse_argv(&name, argv)?),
-                    RawEffectExec::Facet {
-                        facet,
-                        mut variants,
-                    } => {
-                        let facet_id = facets.get_index_of(facet.as_ref()).map(FacetId).context(
-                            format_args!(
+            let exec = match raw_effect.exec {
+                RawEffectExec::Static(argv) => EffectExec::Static(parse_argv(&name, argv)?),
+                RawEffectExec::Facet {
+                    facet,
+                    mut variants,
+                } => {
+                    let facet_id =
+                        facets
+                            .get_index_of(facet.as_ref())
+                            .map(FacetId)
+                            .context(format_args!(
                                 "effect '{name}' command references unknown facet '{facet}'"
-                            ),
-                        )?;
-                        if on.as_slice() != [facet_id] {
-                            return Err(error!(
-                                "effect '{name}' with a facet command must set on = ['{facet}']"
-                            ));
-                        }
+                            ))?;
+                    if on.as_slice() != [facet_id] {
+                        return Err(error!(
+                            "effect '{name}' with a facet command must set on = ['{facet}']"
+                        ));
+                    }
 
-                        let definition = &facets.get_index(facet_id.0).unwrap().1;
-                        if variants.len() != definition.variants.len()
-                            || variants
-                                .keys()
-                                .any(|variant| !definition.variants.contains_key(variant.as_ref()))
-                        {
-                            return Err(error!(
-                                "effect '{name}' command variants do not match facet '{facet}'"
-                            ));
-                        }
-                        let mut commands = Vec::with_capacity(variants.len());
-                        for variant in definition.variants.keys() {
-                            let argv =
-                                variants
-                                    .swap_remove(variant.as_ref())
-                                    .context(format_args!(
+                    let definition = &facets.get_index(facet_id.0).unwrap().1;
+                    if variants.len() != definition.variants.len()
+                        || variants
+                            .keys()
+                            .any(|variant| !definition.variants.contains_key(variant.as_ref()))
+                    {
+                        return Err(error!(
+                            "effect '{name}' command variants do not match facet '{facet}'"
+                        ));
+                    }
+                    let mut commands = Vec::with_capacity(variants.len());
+                    for variant in definition.variants.keys() {
+                        let argv = variants
+                            .swap_remove(variant.as_ref())
+                            .context(format_args!(
                                 "effect '{name}' command variants do not match facet '{facet}'"
                             ))?;
-                            commands.push(parse_argv(&name, argv)?);
-                        }
-                        EffectExec::Facet {
-                            facet: facet_id,
-                            variants: commands.into_boxed_slice(),
-                        }
+                        commands.push(parse_argv(&name, argv)?);
                     }
-                };
+                    EffectExec::Facet {
+                        facet: facet_id,
+                        variants: commands.into_boxed_slice(),
+                    }
+                }
+            };
             effects.push(Effect {
                 name,
                 on: on.into_boxed_slice(),
@@ -223,13 +217,17 @@ impl Config {
             home: raw.home,
             existing_file_strategy: raw.existing_file_strategy,
             facets,
-            files: files.into_boxed_slice(),
+            files,
             effects: effects.into_boxed_slice(),
         })
     }
 
     pub fn facet_id(&self, name: &str) -> Option<FacetId> {
         self.facets.get_index_of(name).map(FacetId)
+    }
+
+    pub fn facet_name(&self, id: FacetId) -> &str {
+        self.facets.get_index(id.0).unwrap().0
     }
 
     pub fn facets(&self) -> impl ExactSizeIterator<Item = (FacetId, &str, &Facet)> {
@@ -453,7 +451,10 @@ mod tests {
         assert_eq!(theme, FacetId(0));
         assert_eq!(config.existing_file_strategy, ExistingFileStrategy::Fail);
         assert_eq!(facet.default, VariantId(1));
-        assert!(matches!(config.files[0].source, Source::Facet(id) if id == theme));
+        assert!(matches!(
+            config.files.get_index(0).unwrap().1,
+            Source::Facet(id) if *id == theme
+        ));
         assert!(config.effects[0].ignore_failure);
         assert_eq!(config.effects[1].on.as_ref(), [theme]);
         assert!(matches!(
