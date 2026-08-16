@@ -27,10 +27,7 @@
   userPackages = lib.mapAttrs (name: user:
     pkgs.writeShellScriptBin "seni" ''
       export HOME=${lib.escapeShellArg user.path.home}
-      export XDG_CONFIG_HOME=${lib.escapeShellArg user.path.config}
-      export XDG_CACHE_HOME=${lib.escapeShellArg user.path.cache}
-      export XDG_DATA_HOME=${lib.escapeShellArg user.path.data}
-      export XDG_STATE_HOME=${lib.escapeShellArg user.path.state}
+      . ${lib.escapeShellArg (toString user.environment.loadEnv)}
       export SENI_MANIFEST=${lib.escapeShellArg (toString user.generated.manifest)}
       export SENI_STATE_DIR=${lib.escapeShellArg stateDirectories.${name}}
       exec ${cfg.cli.package}/bin/seni "$@"

@@ -229,6 +229,20 @@ in {
       description = "packages installed for this user";
     };
 
+    environment = {
+      sessionVariables = mkOption {
+        type = types.attrsOf types.str;
+        default = {};
+        description = "environment variables for this user";
+      };
+
+      loadEnv = mkOption {
+        type = types.path;
+        readOnly = true;
+        description = "script that exports this user's environment variables";
+      };
+    };
+
     path = {
       home = mkOption {
         type = types.str;
@@ -268,8 +282,22 @@ in {
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    assertions = [
+  config = {
+    environment = {
+      sessionVariables = {
+        XDG_CACHE_HOME = cfg.path.cache;
+        XDG_CONFIG_HOME = cfg.path.config;
+        XDG_DATA_HOME = cfg.path.data;
+        XDG_STATE_HOME = cfg.path.state;
+      };
+      loadEnv = lib.pipe cfg.environment.sessionVariables [
+        (lib.mapAttrsToList (variable: value: "export ${variable}=${lib.escapeShellArg value}"))
+        (lib.concatStringsSep "\n")
+        (pkgs.writeShellScript "seni-${name}-environment")
+      ];
+    };
+
+    assertions = lib.mkIf cfg.enable [
       {
         assertion = lib.all (directory:
           lib.hasPrefix "/" directory
@@ -342,6 +370,6 @@ in {
       }
     ];
 
-    generated.manifest = pkgs.writeText "seni-${name}-manifest.json" (builtins.toJSON manifest);
+    generated.manifest = lib.mkIf cfg.enable (pkgs.writeText "seni-${name}-manifest.json" (builtins.toJSON manifest));
   };
 }

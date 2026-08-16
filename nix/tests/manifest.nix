@@ -33,6 +33,8 @@
     };
     file.home."extra.txt".value = "extra";
 
+    environment.sessionVariables.EDITOR = "hx";
+
     effect = {
       static = {
         exec = ["/bin/echo" fixture];
@@ -59,9 +61,18 @@
   };
 
   failedAssertions = lib.filter (entry: !entry.assertion) eval.config.assertions;
+  environment = eval.config.environment;
   manifest = eval.config.generated.manifest;
 in
   assert lib.assertMsg (failedAssertions == []) (lib.concatMapStringsSep "; " (entry: entry.message) failedAssertions);
+  assert lib.assertMsg (environment.sessionVariables
+    == {
+      EDITOR = "hx";
+      XDG_CACHE_HOME = "/home/alice/.cache";
+      XDG_CONFIG_HOME = "/home/alice/.config";
+      XDG_DATA_HOME = "/home/alice/.local/share";
+      XDG_STATE_HOME = "/home/alice/.local/state";
+    }) "Seni's environment variables were not merged";
     pkgs.runCommand "seni-manifest-test" {} ''
       ${pkgs.nushell}/bin/nu ${fixture} ${lib.escapeShellArg (toString manifest)} ${lib.escapeShellArg (toString fixture)} /home/alice light
       touch "$out"
