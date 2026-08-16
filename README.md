@@ -4,45 +4,46 @@
 
 遷移 · せんい · transition
 
-seni is a lightweight home-manager replacement for managing user dotfiles with nix
+seni is a small nix-native home environment manager for nixos and nix-darwin
 
-define facets for your config, then switch between their variants without rebuilding
+it manages files, packages, environment variables, and effects independently for multiple users
 
-facets can represent themes, system fan curves, or any other setting you want to switch on the fly
+unlike [home manager](https://github.com/nix-community/home-manager) and [hjem](https://github.com/feel-co/hjem), seni can build multiple variants of a configuration ahead of time and switch between them without rebuilding
+
+a facet represents something that can change at runtime, such as a theme, application profile, or system setting
+
+every variant is built with the system, so switching only changes the active configuration and runs its effects
 
 ```nix
-seni = {
-  users = {
-    alice = {
-      facet.theme = {
-        default = "light";
-        variants = {
-          light = "light";
-          dark = "dark";
-        };
-      };
+seni.users.nico = {
+  packages = [pkgs.helix];
 
-      file.config."app/theme" = {
-        facet = "theme";
-        value = {value, ...}: "theme = ${value}";
-      };
+  facet.theme = {
+    default = "dark";
+    variants = {
+      dark = "gruvbox";
+      light = "github_light";
     };
+  };
 
-    bob = {
-      facet.theme = {
-        default = "dark";
-        variants = {
-          light = "light";
-          dark = "dark";
-        };
-      };
+  file.config."helix/config.toml" = {
+    facet = "theme";
+    value = {value, ...}: ''
+      theme = "${value}"
+    '';
+    effect = {
+      # reload helix config
+      exec = ["${pkgs.procps}/bin/pkill" "-USR1" "hx"];
+      ignoreFailure = true;
     };
   };
 };
 ```
 
-each user has an independent Seni configuration and receives a configured `seni` command:
+facet switching is done via the CLI:
 
 ```console
-seni switch theme=dark
+seni switch theme=light
 ```
+
+seni is deliberately small, FAST, and simple. use the compact set of primitives to build your own modules, without any hidden machinery
