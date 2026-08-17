@@ -1,41 +1,75 @@
-# seni
+<div align="center">
+  <h1>seni</h1>
 
-<p align="center">
-  <strong>遷移 · せんい · transition</strong><br>
-  <em>shift happens.</em>
-</p>
+  <p>
+    <strong>遷移</strong>（せんい）— transition
+  </p>
+</div>
 
-seni is a small nix-native home environment manager for nixos and nix-darwin
+seni is a small nix-native home environment manager with instant runtime configuration switching for nixos and nix-darwin
 
 it manages files, packages, environment variables, and effects independently for multiple users
 
 in seni, a facet is a runtime setting with named variants. a `theme` facet might have `dark` and `light` variants. files can be derived from the selected variant, and effects can react when it changes
 
+a minimal nixos flake:
+
 ```nix
-seni.users.nico = {
-  packages = [pkgs.helix];
-
-  facet.theme = {
-    default = "dark";
-    variants = {
-      dark = "gruvbox";
-      light = "github_light";
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    seni = {
+      url = "github:nicoburniske/seni";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  file.config."helix/config.toml" = {
-    facet = "theme";
-    value = {theme}: ''
-      # seni variant: ${theme.variant}
-      theme = "${theme.value}"
-    '';
-    effect = {
-      # live reload helix
-      exec = ["${pkgs.procps}/bin/pkill" "-USR1" "hx"];
-      ignoreFailure = true;
+  outputs = {
+    nixpkgs,
+    seni,
+    ...
+  }: {
+    nixosConfigurations.example = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./hardware-configuration.nix
+        seni.nixosModules.default
+        ({pkgs, ...}: {
+          users.users.nico = {
+            isNormalUser = true;
+            createHome = true;
+          };
+
+          seni.users.nico = {
+            packages = [pkgs.helix];
+
+            facet.theme = {
+              default = "dark";
+              variants = {
+                dark = "gruvbox";
+                light = "modus_operandi";
+              };
+            };
+
+            file.config."helix/config.toml" = {
+              facet = "theme";
+              value = {theme}: ''
+                # seni variant: ${theme.variant}
+                theme = "${theme.value}"
+              '';
+              effect = {
+                # live reload helix
+                exec = ["${pkgs.procps}/bin/pkill" "-USR1" "hx"];
+                ignoreFailure = true;
+              };
+            };
+          };
+          system.stateVersion = "26.05";
+        })
+      ];
     };
   };
-};
+}
 ```
 
 a file can also depend on several facets: `facet = ["theme" "density"]`
@@ -46,8 +80,7 @@ facet switching is done via the CLI:
 seni switch theme=light
 ```
 
-
-## comparison
+## alternatives
 
 ### [home manager](https://github.com/nix-community/home-manager)
 
@@ -59,12 +92,10 @@ the payoff is a vast module ecosystem: thousands of programs and services are re
 
 hjem and seni are similar in size/complexity
 
-hjem manages files, packages, and session variables, and its standalone CLI works without nix.
+hjem manages files, packages, and session variables, and its standalone CLI works without nix
 
 it has no equivalent to facets or effects. configuration changes require a new generation
 
 ### seni
 
-seni is nix-native and requires nixos or nix-darwin. it has no standalone mode
-
-seni prioritizes simplicity and performance: few primitives, no hidden machinery, minimal build-time overhead, and instant facet switching
+seni is nix-native and has no standalone mode. it prioritizes simplicity and performance: few primitives, no hidden machinery, minimal build-time overhead, and instant facet switching
