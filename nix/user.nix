@@ -8,11 +8,55 @@
   cfg = config;
   inherit (lib) mkOption types;
 
+  # records retain typed fields without evaluating a module for every file
+  recordType = {
+    description,
+    fields,
+  }:
+    types.mkOptionType {
+      name = "seniRecord";
+      inherit description;
+      check = builtins.isAttrs;
+      merge = location: definitions: let
+        definitionsByField = lib.zipAttrs (map
+          (definition:
+            lib.mapAttrs (_: value: {
+              inherit (definition) file;
+              inherit value;
+            })
+            definition.value)
+          definitions);
+        unknown = removeAttrs definitionsByField (builtins.attrNames fields);
+      in
+        if unknown != {}
+        then throw "${lib.showOption location} has unknown fields: ${lib.concatStringsSep ", " (builtins.attrNames unknown)}"
+        else
+          lib.mapAttrs (fieldName: field:
+            (lib.mergeDefinitions
+              (location ++ [fieldName])
+              field.type
+              ((definitionsByField.${fieldName} or [])
+                ++ lib.optional (field ? default) {
+                  file = "default of ${lib.showOption (location ++ [fieldName])}";
+                  value = lib.mkOptionDefault field.default;
+                })).mergedValue)
+          fields;
+      emptyValue.value = {};
+      # this submodule is only evaluated when option documentation is requested
+      getSubOptions =
+        (types.submodule {
+          options = lib.mapAttrs (_: mkOption) fields;
+        }).getSubOptions;
+      nestedTypes = lib.mapAttrs (_: field: field.type) fields;
+    };
+
   fileKinds = ["home" "config" "cache" "data" "state"];
   home = cfg.path.home;
 
   valueType = types.oneOf [types.str types.path];
   argvType = types.listOf valueType;
+  fileValueType = types.oneOf [valueType (types.functionTo valueType)];
+  effectExecType = types.oneOf [argvType (types.functionTo argvType)];
 
   validSegment = segment: segment != "" && segment != "." && segment != "..";
   validCommand = argv: argv != [] && lib.hasPrefix "/" (builtins.head argv);
@@ -32,35 +76,34 @@
     };
   };
 
-  effectOptions = {
-    exec = mkOption {
-      type = types.oneOf [argvType (types.functionTo argvType)];
-      description = "effect argv";
-    };
-
-    ignoreFailure = mkOption {
-      type = types.bool;
-      default = false;
-      description = "whether to ignore a nonzero exit status";
+  fileEffectOptionType = recordType {
+    description = "Seni file effect definition";
+    fields = {
+      exec = {
+        type = effectExecType;
+        description = "effect argv";
+      };
+      ignoreFailure = {
+        type = types.bool;
+        default = false;
+        description = "whether to ignore a nonzero exit status";
+      };
     };
   };
 
-  fileEffectOptionType = types.submodule {options = effectOptions;};
-
-  fileOptionType = types.submodule {
-    options = {
-      facet = mkOption {
-        type = types.nullOr (types.coercedTo types.str lib.singleton (types.listOf types.str));
+  fileOptionType = recordType {
+    description = "Seni file definition";
+    fields = {
+      facet = {
+        type = types.nullOr (types.oneOf [types.str (types.listOf types.str)]);
         default = null;
         description = "facets used to generate this file";
       };
-
-      value = mkOption {
-        type = types.oneOf [valueType (types.functionTo valueType)];
+      value = {
+        type = fileValueType;
         description = "file contents or source";
       };
-
-      effect = mkOption {
+      effect = {
         type = types.nullOr fileEffectOptionType;
         default = null;
         description = "effect triggered by this file's facet, or every switch for a static file";
@@ -68,9 +111,19 @@
     };
   };
 
-  effectOptionType = types.submodule {
-    options = effectOptions // {
-      on = mkOption {
+  effectOptionType = recordType {
+    description = "Seni effect definition";
+    fields = {
+      exec = {
+        type = effectExecType;
+        description = "effect argv";
+      };
+      ignoreFailure = {
+        type = types.bool;
+        default = false;
+        description = "whether to ignore a nonzero exit status";
+      };
+      on = {
         type = types.listOf types.str;
         default = [];
         description = "facets that trigger this effect during a switch";
@@ -107,10 +160,20 @@
 
   files = lib.concatMap (kind:
     lib.mapAttrsToList (path: file: let
+      facet = file.facet or null;
       facets =
-        if file.facet == null
+        if facet == null
         then []
-        else lib.sort builtins.lessThan file.facet;
+        else
+          lib.sort builtins.lessThan (
+            if builtins.isString facet
+            then [facet]
+            else facet
+          );
+      effect =
+        if (file.effect or null) == null
+        then null
+        else file.effect // {ignoreFailure = file.effect.ignoreFailure or false;};
     in {
       path =
         if directoryRoots.${kind} == null || directoryRoots.${kind} == ""
@@ -118,8 +181,8 @@
         else "${directoryRoots.${kind}}/${path}";
       valid = lib.all validSegment (lib.splitString "/" path);
       rootKey = builtins.toJSON facets;
-      inherit facets;
-      inherit (file) effect value;
+      inherit effect facets;
+      inherit (file) value;
     })
     cfg.file.${kind})
   fileKinds;
@@ -155,19 +218,20 @@
       dynamicFiles}
     '';
 
-  roots = lib.mapAttrsToList (key: dynamicFiles: let
-    facets = (builtins.head dynamicFiles).facets;
-    selections = lib.cartesianProduct (lib.genAttrs facets (facet: builtins.attrNames cfg.facet.${facet}.variants));
-  in {
-    inherit facets key;
-    variants = map (selection:
-      buildRoot
-      ("seni-${name}-" + lib.concatMapStringsSep "-" (facet: "${facet}-${selection.${facet}}") facets)
-      dynamicFiles
-      (lib.mapAttrs context selection))
-    selections;
-  })
-  dynamicFilesByRoot;
+  roots =
+    lib.mapAttrsToList (key: dynamicFiles: let
+      facets = (builtins.head dynamicFiles).facets;
+      selections = lib.cartesianProduct (lib.genAttrs facets (facet: builtins.attrNames cfg.facet.${facet}.variants));
+    in {
+      inherit facets key;
+      variants = map (selection:
+        buildRoot
+        ("seni-${name}-" + lib.concatMapStringsSep "-" (facet: "${facet}-${selection.${facet}}") facets)
+        dynamicFiles
+        (lib.mapAttrs context selection))
+      selections;
+    })
+    dynamicFilesByRoot;
   rootIndices = lib.pipe roots [
     (lib.imap0 (index: root: lib.nameValuePair root.key index))
     builtins.listToAttrs
@@ -219,10 +283,12 @@
         variants = builtins.attrNames data.variants;
       })
       cfg.facet;
-    roots = map (root: {
-      inherit (root) facets;
-      variants = map toString root.variants;
-    }) roots;
+    roots =
+      map (root: {
+        inherit (root) facets;
+        variants = map toString root.variants;
+      })
+      roots;
     files = lib.pipe files [
       (map (file: {
         name = file.path;
@@ -230,7 +296,12 @@
           if lib.isFunction file.value
           then {root = rootIndices.${file.rootKey};}
           else if builtins.isString file.value
-          then toString (pkgs.writeText (lib.strings.sanitizeDerivationName "seni-${name}-${file.path}") file.value)
+          then
+            # context-free strings use cheap toFile primitive
+            # context-bearing strings need a derivation to retain dependencies
+            if builtins.hasContext file.value
+            then toString (pkgs.writeText (lib.strings.sanitizeDerivationName "seni-${name}-${file.path}") file.value)
+            else toString (builtins.toFile "seni-file" file.value)
           else toString (materialize file.value);
       }))
       builtins.listToAttrs
@@ -399,7 +470,8 @@ in {
         in
           !lib.hasPrefix "${home}/" state
           || !lib.any (path:
-            path == relative
+            path
+            == relative
             || lib.hasPrefix "${relative}/" path
             || lib.hasPrefix "${path}/" relative)
           managedPaths;
