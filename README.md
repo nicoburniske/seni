@@ -99,3 +99,5 @@ it has no equivalent to facets or effects. configuration changes require a new g
 ### seni
 
 seni is nix-native and has no standalone mode. it prioritizes simplicity and performance: few primitives, no hidden machinery, minimal build-time overhead, and instant facet switching
+
+in the [rebuild benchmark](bench/rebuild/README.md), seni is at least as fast as hjem while home manager takes 1.2–3.6× as long depending on the rebuild case (in a best-case file-only config)
