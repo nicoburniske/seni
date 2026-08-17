@@ -359,13 +359,14 @@ mod tests {
     #[test]
     fn bounds_captured_output() {
         let (mut writer, reader) = UnixStream::pair().unwrap();
-        writer.write_all(&vec![b'x'; OUTPUT_LIMIT * 2]).unwrap();
-        drop(writer);
-        nonblocking(&reader).unwrap();
+        let writer = std::thread::spawn(move || {
+            writer.write_all(&vec![b'x'; OUTPUT_LIMIT * 2]).unwrap();
+        });
         let mut capture = Capture::new(reader);
 
         capture.drain().unwrap();
         capture.drain().unwrap();
+        writer.join().unwrap();
 
         assert_eq!(capture.output.len(), OUTPUT_LIMIT);
         assert!(capture.truncated);
