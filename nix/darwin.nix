@@ -5,6 +5,45 @@
   ...
 }: let
   cfg = config.seni;
+  applicationsCfg = cfg.darwin.applications;
+
+  userApplications = lib.mapAttrs (name: user:
+    pkgs.buildEnv {
+      name = "seni-${name}-applications";
+      paths = lib.optionals user.enable user.packages;
+      pathsToLink = ["/Applications"];
+    })
+  cfg.users;
+
+  darwinActivation = pkgs.writeShellScript "seni-darwin-activate" ''
+    set -eu
+
+    user="$(${pkgs.coreutils}/bin/id -un)"
+    case "$user" in
+      ${lib.concatMapAttrsStringSep "\n" (name: user: let
+        target = "${user.path.home}/${applicationsCfg.directory}";
+      in ''
+        ${lib.escapeShellArg name})
+          target=${lib.escapeShellArg target}
+          ${pkgs.coreutils}/bin/mkdir -p "$target"
+          ${pkgs.rsync}/bin/rsync \
+            --recursive \
+            --checksum \
+            --perms \
+            --links \
+            --copy-unsafe-links \
+            --specials \
+            --delete \
+            --chmod=+w \
+            ${userApplications.${name}}/Applications/ \
+            "$target/"
+          exec ${cfg.generated.activation}
+          ;;
+      '')
+      cfg.users}
+      *) exit 0 ;;
+    esac
+  '';
 in {
   imports = [
     (import ./module.nix {
@@ -30,10 +69,50 @@ in {
     })
   ];
 
+  options.seni = {
+    darwin.applications = {
+      directory = lib.mkOption {
+        type = lib.types.str;
+        default = "Applications/Seni Apps";
+        description = "application directory relative to each user's home directory";
+      };
+    };
+
+    generated = {
+      applications = lib.mkOption {
+        type = lib.types.attrsOf lib.types.package;
+        readOnly = true;
+        internal = true;
+      };
+
+      darwinActivation = lib.mkOption {
+        type = lib.types.path;
+        readOnly = true;
+        internal = true;
+      };
+    };
+  };
+
   config = lib.mkIf (cfg.users != {}) {
+    assertions = [
+      {
+        assertion =
+          applicationsCfg.directory
+          != ""
+          && !lib.hasPrefix "/" applicationsCfg.directory
+          && lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.splitString "/" applicationsCfg.directory);
+        message = "seni.darwin.applications.directory must be a normalized relative path";
+      }
+    ];
+
+    seni.generated = {
+      applications = userApplications;
+      inherit darwinActivation;
+    };
+
     launchd.agents.seni-activate.serviceConfig = {
       Label = "org.seni.activate";
-      Program = toString cfg.generated.activation;
+      Program = toString darwinActivation;
       RunAtLoad = true;
     };
 
@@ -48,7 +127,7 @@ in {
           fi
         ''
         else ''
-          /usr/bin/sudo --user=${escapedName} -- ${cfg.generated.activation}
+          /usr/bin/sudo --user=${escapedName} -- ${darwinActivation}
         '')
       cfg.users
     );
