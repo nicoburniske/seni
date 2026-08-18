@@ -5,7 +5,7 @@
   ...
 }: let
   cfg = config.seni;
-  applicationsCfg = cfg.darwin.applications;
+  appDir = cfg.darwin.applications.directory;
 
   userApplications = lib.mapAttrs (name: user:
     pkgs.buildEnv {
@@ -20,11 +20,9 @@
 
     user="$(${pkgs.coreutils}/bin/id -un)"
     case "$user" in
-      ${lib.concatMapAttrsStringSep "\n" (name: user: let
-        target = "${user.path.home}/${applicationsCfg.directory}";
-      in ''
+      ${lib.concatMapAttrsStringSep "\n" (name: user: ''
         ${lib.escapeShellArg name})
-          target=${lib.escapeShellArg target}
+          target=${lib.escapeShellArg "${user.path.home}/${appDir}"}
           ${pkgs.coreutils}/bin/mkdir -p "$target"
           ${pkgs.rsync}/bin/rsync \
             --recursive \
@@ -68,39 +66,35 @@ in {
       };
     })
   ];
-
-  options.seni = {
-    darwin.applications = {
-      directory = lib.mkOption {
-        type = lib.types.str;
-        default = "Applications/Seni Apps";
-        description = "application directory relative to each user's home directory";
-      };
+  options.seni = let
+    inherit (lib) mkOption types;
+  in {
+    darwin.applications.directory = mkOption {
+      type = types.str;
+      default = "Applications/Seni Apps";
+      description = "application directory relative to each user's home directory";
     };
-
     generated = {
-      applications = lib.mkOption {
-        type = lib.types.attrsOf lib.types.package;
+      applications = mkOption {
+        type = types.attrsOf types.package;
         readOnly = true;
         internal = true;
       };
-
-      darwinActivation = lib.mkOption {
-        type = lib.types.path;
+      darwinActivation = mkOption {
+        type = types.path;
         readOnly = true;
         internal = true;
       };
     };
   };
-
   config = lib.mkIf (cfg.users != {}) {
     assertions = [
       {
         assertion =
-          applicationsCfg.directory
+          appDir
           != ""
-          && !lib.hasPrefix "/" applicationsCfg.directory
-          && lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.splitString "/" applicationsCfg.directory);
+          && !lib.hasPrefix "/" appDir
+          && lib.all (segment: segment != "" && segment != "." && segment != "..") (lib.splitString "/" appDir);
         message = "seni.darwin.applications.directory must be a normalized relative path";
       }
     ];
